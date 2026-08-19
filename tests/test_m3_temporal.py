@@ -45,16 +45,16 @@ class TemporalInspectionTests(unittest.TestCase):
     def test_inspection_marks_changes_at_cursor(self):
         rows = vcdtui.inspect_at(self.signals, 20)
         by_name = {row.signal.reference: row for row in rows}
-        self.assertEqual((by_name["count [3:0]"].before, by_name["count [3:0]"].after), ("0001", "0000"))
-        self.assertTrue(by_name["count [3:0]"].changed)
+        self.assertEqual((by_name["count"].before, by_name["count"].after), ("0001", "0000"))
+        self.assertTrue(by_name["count"].changed)
         self.assertEqual((by_name["stop"].before, by_name["stop"].after), ("0", "1"))
         self.assertTrue(by_name["stop"].changed)
 
     def test_inspection_between_events_keeps_same_value(self):
         rows = vcdtui.inspect_at(self.signals, 12)
         by_name = {row.signal.reference: row for row in rows}
-        self.assertEqual((by_name["count [3:0]"].before, by_name["count [3:0]"].after), ("0001", "0001"))
-        self.assertFalse(by_name["count [3:0]"].changed)
+        self.assertEqual((by_name["count"].before, by_name["count"].after), ("0001", "0001"))
+        self.assertFalse(by_name["count"].changed)
 
     def test_sampling_is_deterministic(self):
         clk = next(signal for signal in self.signals if signal.reference == "clk")

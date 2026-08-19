@@ -46,7 +46,7 @@ class ParserTests(unittest.TestCase):
         vcd = vcdtui.parse_vcd_text(SAMPLE)
         self.assertEqual(
             [s.full_name for s in vcd.signals],
-            ["top.dut.clk", "top.dut.count [3:0]", "top.dut.clk_alias"],
+            ["top.dut.clk", "top.dut.count", "top.dut.clk_alias"],
         )
         count = vcd.streams["$"]
         self.assertEqual([c.value for c in count.changes], ["0011", "0010"])
@@ -91,14 +91,14 @@ class CLITests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(
             out.splitlines(),
-            ["top.dut.clk", "top.dut.count [3:0]", "top.dut.clk_alias"],
+            ["top.dut.clk", "top.dut.count", "top.dut.clk_alias"],
         )
 
     def test_find_case_insensitive(self):
         code, out, err = self.run_main("--find", "COUNT")
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
-        self.assertEqual(out.strip(), "top.dut.count [3:0]")
+        self.assertEqual(out.strip(), "top.dut.count")
 
     def test_clean_error_without_traceback(self):
         bad = self.path.with_name("bad.vcd")
