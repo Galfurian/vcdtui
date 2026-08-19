@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.swp
+.DS_Store
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
