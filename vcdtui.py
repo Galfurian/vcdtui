@@ -12,7 +12,18 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
 __version__ = "0.2.0"
 
@@ -673,7 +684,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-s",
         "--signals",
         metavar="SELECTORS",
-        help="comma-separated signal names or substrings to display",
+        action="append",
+        help="signal selectors to display; comma-separated, and repeatable",
     )
     parser.add_argument("--from", dest="time_from", metavar="TIME", help="start time")
     parser.add_argument("--to", dest="time_to", metavar="TIME", help="end time")
@@ -890,27 +902,36 @@ def _resolve_selector(vcd: VCDFile, selector: str) -> Tuple[List[int], str]:
     return [], "none"
 
 
+def _split_selectors(selectors: Union[str, Sequence[str]]) -> List[str]:
+    """Flatten one or more --signals values into the selectors they name."""
+    values = [selectors] if isinstance(selectors, str) else list(selectors)
+    requested = [part.strip() for value in values for part in value.split(",")]
+    if any(not part for part in requested):
+        raise VCDTUIError("--signals requires non-empty comma-separated selectors")
+    return requested
+
+
 def select_signals(
     vcd: VCDFile,
-    selectors: Optional[str],
+    selectors: Optional[Union[str, Sequence[str]]],
     *,
     warnings: Optional[List[str]] = None,
 ) -> List[Signal]:
     """Resolve --signals selectors, in declaration order and without duplicates.
+
+    Accepts one comma-separated string or a list of them, so that repeating the
+    option and listing the selectors in one value mean the same thing.
 
     Selectors are resolved in tiers, narrowest first: a signal's whole name, then
     a trailing run of its scopes, then a substring. A precise name is therefore
     never widened - "clk" means the top-level clk when one exists, and every clk
     in the design only when it does not.
     """
-    if selectors is None:
+    requested = [] if selectors is None else _split_selectors(selectors)
+    if not requested:
         if not vcd.signals:
             raise VCDTUIError("trace contains no signals")
         return list(vcd.signals)
-
-    requested = [part.strip() for part in selectors.split(",")]
-    if not requested or any(not part for part in requested):
-        raise VCDTUIError("--signals requires non-empty comma-separated selectors")
 
     selected_indexes: Set[int] = set()
     for selector in requested:

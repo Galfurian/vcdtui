@@ -406,6 +406,11 @@ does not name a path at all. Ordering the tiers means a precise selector is neve
 widened: `clk` selects the top-level `clk` when the design has one, and every
 `clk` in the design only when it does not.
 
+`--signals` is repeatable and each value is comma-separated, so `-s clk -s value4`
+and `-s clk,value4` name the same set. Selection order always follows the trace's
+declaration order rather than the order the selectors were typed, which keeps
+`--dump` columns stable no matter how the selection was spelled.
+
 ### Globs
 
 Globs use the shell convention with `.` as the separator: `*` and `?` match
