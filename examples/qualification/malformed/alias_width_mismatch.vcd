@@ -1,0 +1,6 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! one_bit $end
+$var wire 4 ! four_bits [3:0] $end
+$upscope $end
+$enddefinitions $end
