@@ -138,8 +138,16 @@ jobs:
       - name: A truncated trace is still readable
         run: |
           set -euxo pipefail
-          head -c 400 smoke.vcd > cut.vcd
-          python3 vcdtui.py cut.vcd --list
+          # Cut after the header, not inside it: a trace whose value changes stop
+          # is recoverable, a header that stops is not, and only the first is
+          # what this step is about. A byte count would silently become the
+          # wrong one the moment the simulated design grows.
+          header=$(grep -b -m1 '^\$enddefinitions' smoke.vcd | cut -d: -f1)
+          head -c "$((header + 200))" smoke.vcd > cut.vcd
+          python3 vcdtui.py cut.vcd --list > recovered.txt 2> truncated.txt
+          # Recovery means both halves: the signals survive and it says so.
+          grep -q 'top.dut8.value' recovered.txt
+          grep -q 'trace is truncated' truncated.txt
       - name: A closed pipe is not an error
         run: |
           set -u
