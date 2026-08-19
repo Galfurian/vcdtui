@@ -166,6 +166,7 @@ class TUIState:
     show_inspector: bool = False
     marker_a: Optional[int] = None
     marker_b: Optional[int] = None
+    display_formats: List[str] = field(default_factory=list)
     status: str = ""
 
 
@@ -440,6 +441,33 @@ def inspect_at(signals: Sequence[Signal], cursor: int) -> List[Inspection]:
         )
         for signal in signals
     ]
+
+
+_DISPLAY_FORMATS = ("binary", "hex", "unsigned", "signed")
+
+
+def format_signal_value(signal: Signal, value: Optional[str], display_format: str = "binary") -> str:
+    """Format one VCD value for presentation without changing the stored trace value."""
+    if value is None:
+        return "?"
+    text = value.lower()
+    if signal.width <= 1 or text == "?":
+        return text
+    if display_format not in _DISPLAY_FORMATS:
+        raise ValueError(f"unknown display format {display_format!r}")
+    if any(ch in text for ch in "xz?"):
+        return text
+    if display_format == "binary":
+        return text
+    number = int(text, 2)
+    if display_format == "hex":
+        digits = max(1, (signal.width + 3) // 4)
+        return f"0x{number:0{digits}X}"
+    if display_format == "unsigned":
+        return str(number)
+    sign_bit = 1 << (signal.width - 1)
+    signed = number - (1 << signal.width) if number & sign_bit else number
+    return str(signed)
 
 
 def next_transition(stream: ValueStream, cursor: int, *, forward: bool) -> Optional[int]:
@@ -798,27 +826,28 @@ def render_bus_track(
     width: int,
     *,
     ascii_only: bool,
+    display_format: str = "binary",
 ) -> str:
     if width <= 0:
         return ""
     ticks = _sample_ticks(start, end, width)
-    values = [signal.stream.value_at(tick) or "?" for tick in ticks]
+    raw_values = [signal.stream.value_at(tick) or "?" for tick in ticks]
     horizontal = "-" if ascii_only else "─"
     boundary = "|" if ascii_only else "│"
     line = [horizontal] * width
 
     run_start = 0
     while run_start < width:
-        value = values[run_start]
+        raw_value = raw_values[run_start]
         run_end = run_start + 1
-        while run_end < width and values[run_end] == value:
+        while run_end < width and raw_values[run_end] == raw_value:
             run_end += 1
         if run_start > 0:
             line[run_start] = boundary
         content_start = run_start + (1 if run_start > 0 else 0)
         available = max(0, run_end - content_start)
         if available > 0:
-            label = value[:available]
+            label = format_signal_value(signal, raw_value, display_format)[:available]
             label_start = content_start + max(0, (available - len(label)) // 2)
             for offset, char in enumerate(label):
                 if label_start + offset < run_end:
@@ -834,10 +863,13 @@ def render_waveform_track(
     width: int,
     *,
     ascii_only: bool,
+    display_format: str = "binary",
 ) -> str:
     if signal.width == 1:
         return render_scalar_track(signal, start, end, width, ascii_only=ascii_only)
-    return render_bus_track(signal, start, end, width, ascii_only=ascii_only)
+    return render_bus_track(
+        signal, start, end, width, ascii_only=ascii_only, display_format=display_format
+    )
 
 
 def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
@@ -956,9 +988,21 @@ def _visible_signal_indexes(state: TUIState) -> List[int]:
     return [index for index, enabled in enumerate(state.selected) if enabled]
 
 
-def marker_values(signals: Sequence[Signal], tick: int) -> List[str]:
+def marker_values(
+    signals: Sequence[Signal],
+    tick: int,
+    display_formats: Optional[Sequence[str]] = None,
+) -> List[str]:
     """Return post-change values at a marker tick for the supplied signals."""
-    return [signal.stream.value_at(tick) or "?" for signal in signals]
+    formats = list(display_formats) if display_formats is not None else ["binary"] * len(signals)
+    return [
+        format_signal_value(
+            signal,
+            signal.stream.value_at(tick),
+            formats[index] if index < len(formats) else "binary",
+        )
+        for index, signal in enumerate(signals)
+    ]
 
 
 def marker_delta_ticks(marker_a: Optional[int], marker_b: Optional[int]) -> Optional[int]:
@@ -976,6 +1020,7 @@ def marker_table_lines(
     width: int,
     *,
     ascii_only: bool,
+    display_formats: Optional[Sequence[str]] = None,
 ) -> List[str]:
     """Build a compact marker table using the currently displayed signals."""
     if marker_a is None and marker_b is None:
@@ -986,19 +1031,23 @@ def marker_table_lines(
     fixed_widths = [6, 8, 10]
     used = sum(fixed_widths) + len(sep) * (len(fixed_widths) - 1)
 
+    formats = list(display_formats) if display_formats is not None else ["binary"] * len(signals)
     chosen: List[Signal] = []
+    chosen_formats: List[str] = []
     signal_widths: List[int] = []
-    for signal in signals:
+    for signal_index, signal in enumerate(signals):
+        display_format = formats[signal_index] if signal_index < len(formats) else "binary"
         values = []
         if marker_a is not None:
-            values.append(signal.stream.value_at(marker_a) or "?")
+            values.append(format_signal_value(signal, signal.stream.value_at(marker_a), display_format))
         if marker_b is not None:
-            values.append(signal.stream.value_at(marker_b) or "?")
+            values.append(format_signal_value(signal, signal.stream.value_at(marker_b), display_format))
         col_width = min(14, max(3, len(signal.reference), *(len(value) for value in values)))
         extra = len(sep) + col_width
         if used + extra > max(1, width):
             break
         chosen.append(signal)
+        chosen_formats.append(display_format)
         signal_widths.append(col_width)
         used += extra
 
@@ -1021,7 +1070,7 @@ def marker_table_lines(
             label,
             str(tick),
             vcd.timescale.format_tick(tick),
-            *marker_values(chosen, tick),
+            *marker_values(chosen, tick, chosen_formats),
         ]
 
     lines = [format_row(headers), format_row(marker_row("A", marker_a)), format_row(marker_row("B", marker_b))]
@@ -1173,6 +1222,7 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "  Up/Down, j/k        move within the focused pane",
         "  Enter / Space       expand scope / toggle signal",
         "  a / A               show all / hide all signals",
+        "  v                   value format for focused vector",
         "Time & view",
         f"  {arrows:<20} cursor one VCD tick",
         f"  {ctrl_arrows:<20} previous / next clean binary edge",
@@ -1213,8 +1263,8 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
     arrows = "<- -> cursor" if ascii_only else "←→ cursor"
     ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
     candidates = [
-        ["Tab pane", "Space toggle", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
-        ["Tab pane", "Space toggle", arrows, "+/- zoom", "F1/? help", "q quit"],
+        ["Tab pane", "Space toggle", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "Space toggle", "v format", arrows, "+/- zoom", "F1/? help", "q quit"],
         ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
         [arrows, "F1/? help", "q quit"],
         ["F1/? help", "q quit"],
@@ -1224,6 +1274,41 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
         if len(rendered) <= width:
             return rendered
     return "?"[:width]
+
+
+def _prompt_value_format(stdscr, signal: Signal, current: str) -> Optional[str]:
+    """Prompt for one vector signal's presentation radix."""
+    import curses
+
+    options = [
+        ("b", "binary", "binary"),
+        ("x", "hex", "hexadecimal"),
+        ("u", "unsigned", "unsigned decimal"),
+        ("s", "signed", "signed decimal (two's complement)"),
+    ]
+    lines = [f"value format: {signal.reference}", ""]
+    for key, name, label in options:
+        marker = "*" if current == name else " "
+        lines.append(f" {marker} [{key}] {label}")
+    lines.extend(["", " Esc cancel"])
+    height, width = stdscr.getmaxyx()
+    content_width = max(len(line) for line in lines)
+    top, left, panel_height, panel_width = _centered_panel_geometry(
+        height, width, content_width, len(lines)
+    )
+    try:
+        panel = curses.newwin(panel_height, panel_width, top, left)
+        panel.keypad(True)
+        panel.erase()
+        panel.box()
+        for row, line in enumerate(lines[: max(0, panel_height - 2)], start=1):
+            _safe_addstr(panel, row, 2, line, curses.A_BOLD if row == 1 else 0)
+        panel.refresh()
+        key = panel.getch()
+    except curses.error:
+        return None
+    mapping = {ord(key): name for key, name, _ in options}
+    return mapping.get(key)
 
 
 def _show_help(stdscr, *, ascii_only: bool) -> None:
@@ -1257,7 +1342,6 @@ def _show_help(stdscr, *, ascii_only: bool) -> None:
         panel.refresh()
         panel.getch()
     except curses.error:
-        # Very small or unusual terminals may reject a subwindow. Keep help usable.
         stdscr.erase()
         for row, line in enumerate(lines[: max(0, height - 1)]):
             attr = curses.A_BOLD if row == 0 else 0
@@ -1419,8 +1503,10 @@ def _draw_tui(
     for row, visible_pos in enumerate(range(state.wave_offset, wave_end), start=content_row):
         signal_index = visible_indexes[visible_pos]
         signal = all_signals[signal_index]
-        value = signal.stream.value_at(state.cursor) or "?"
-        value_room = min(max(signal.width, 1), 10)
+        raw_value = signal.stream.value_at(state.cursor) or "?"
+        display_format = state.display_formats[signal_index]
+        value = format_signal_value(signal, raw_value, display_format)
+        value_room = min(max(len(value), 1), 12)
         name_room = max(4, meta_width - value_room - 2)
         name = signal.reference
         if len(name) > name_room:
@@ -1437,9 +1523,10 @@ def _draw_tui(
             state.view_end,
             wave_width,
             ascii_only=ascii_only,
+            display_format=display_format,
         )
         track_attr = attrs["vector"] if signal.width > 1 else attrs["scalar"]
-        if "x" in value or "z" in value:
+        if "x" in raw_value or "z" in raw_value:
             track_attr = attrs["bad"]
         _safe_addstr(stdscr, row, wave_x, track, track_attr)
         for tick, marker_attr in ((state.marker_a, attrs["marker_a"]), (state.marker_b, attrs["marker_b"])):
@@ -1464,12 +1551,14 @@ def _draw_tui(
         _safe_addstr(stdscr, inspector_top, 0, rule * max(1, width - 1), attrs["dim"])
         _safe_addstr(stdscr, inspector_top + 1, 0, "inspection: before -> after", curses.A_BOLD)
         inspect_signals = [all_signals[index] for index in shown_indexes]
-        for offset, item in enumerate(inspect_at(inspect_signals, state.cursor), start=2):
+        inspection = inspect_at(inspect_signals, state.cursor)
+        for offset, (item, signal_index) in enumerate(zip(inspection, shown_indexes), start=2):
             row = inspector_top + offset
             if row >= height - 1:
                 break
-            before = item.before or "?"
-            after = item.after or "?"
+            display_format = state.display_formats[signal_index]
+            before = format_signal_value(item.signal, item.before, display_format)
+            after = format_signal_value(item.signal, item.after, display_format)
             marker = "*" if item.changed else " "
             text = f"{marker} {item.signal.reference:<22} {before:>10} -> {after:<10}"
             attr = curses.A_BOLD if item.changed else 0
@@ -1480,6 +1569,7 @@ def _draw_tui(
         rule = "-" if ascii_only else "─"
         _safe_addstr(stdscr, panel_top, 0, rule * max(1, width - 1), attrs["dim"])
         table_signals = [all_signals[index] for index in visible_indexes]
+        table_formats = [state.display_formats[index] for index in visible_indexes]
         lines = marker_table_lines(
             vcd,
             table_signals,
@@ -1487,6 +1577,7 @@ def _draw_tui(
             state.marker_b,
             width - 1,
             ascii_only=ascii_only,
+            display_formats=table_formats,
         )
         for offset, line in enumerate(lines[: max(0, marker_height - 1)], start=1):
             _safe_addstr(stdscr, panel_top + offset, 0, line)
@@ -1585,6 +1676,7 @@ def run_tui(
             view_start=start,
             view_end=end,
             selected=_initial_selection(all_signals, initial_signals),
+            display_formats=["binary"] * len(all_signals),
             expanded_scopes=all_scope_paths(all_signals),
         )
         while True:
@@ -1651,6 +1743,22 @@ def run_tui(
                 continue
             if key == ord("A"):
                 state.selected[:] = [False] * len(all_signals)
+                continue
+            if key in (ord("v"), ord("V")):
+                signal_index = _navigation_signal_index(all_signals, state)
+                if signal_index is None:
+                    state.status = "focus a signal before choosing a value format"
+                    continue
+                signal = all_signals[signal_index]
+                if signal.width <= 1:
+                    state.status = f"{signal.full_name} is scalar; binary display is fixed"
+                    continue
+                selected_format = _prompt_value_format(
+                    stdscr, signal, state.display_formats[signal_index]
+                )
+                if selected_format is not None:
+                    state.display_formats[signal_index] = selected_format
+                    state.status = f"{signal.full_name}: {selected_format}"
                 continue
             if key == ord("i"):
                 state.show_inspector = not state.show_inspector
