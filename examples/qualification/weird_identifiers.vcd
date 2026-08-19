@@ -1,0 +1,32 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! plain $end
+$var wire 1 " quoted_code $end
+$var wire 4 $% data [3:0] $end
+$var wire 4 &/ \internal.signal [3:0] $end
+$var wire 1 {| odd_flag $end
+$scope module cpu $end
+$var wire 2 @ state [1:0] $end
+$upscope $end
+$scope module io $end
+$var wire 2 ? state [1:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+1"
+b0001 $%
+b1010 &/
+0{|
+b00 @
+b11 ?
+$end
+#7
+1!
+0"
+b0010 $%
+b0101 &/
+1{|
+b01 @
+b10 ?
