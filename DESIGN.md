@@ -2,424 +2,429 @@
 
 ## Purpose
 
-`vcdtui` is a small, self-contained VCD inspection tool for the terminal.
+`vcdtui` is a small digital timing inspection tool for VCD traces. It is designed to make temporal evidence easy to inspect from a terminal, both interactively and non-interactively.
 
-Its primary job is to make temporal behavior visible with as little setup as possible. A user should be able to point it at a VCD file and immediately inspect signals, move through time, select the signals that matter, and examine value changes around interesting events.
+The project deliberately values a small, explainable implementation over breadth.
 
-The implementation should remain simple enough to read, teach, modify, and carry into constrained environments.
+## Baseline contract
+
+- Python 3.10 or newer.
+- Python standard library only at runtime.
+- Linux userspace is the qualified execution target.
+- The normal interactive target is a Linux process attached to an ordinary host terminal, including a terminal attached to a container.
+- Native Windows support is not a course-core requirement.
+- No feature in the course core may require a package manager or a third-party Python package.
+
+The program should remain runnable as:
+
+```text
+python3 vcdtui.py trace.vcd
+```
 
 ## Core principles
 
-### Standard library only
+1. **The parser is the source of truth.**
+   The TUI and the deterministic stdout renderer are clients of the same parsed model.
+2. **Non-interactive behavior is a first-class capability.**
+   Parsing, time handling, signal selection, and rendering must be qualifiable without driving a terminal UI.
+3. **VCD time is exact.**
+   Raw timestamps are integers. Unit conversion uses integer or rational arithmetic and never floating point.
+4. **Value changes are sparse.**
+   A signal stream stores changes, not a value copied at every global timestamp.
+5. **Names and value streams are distinct objects.**
+   Multiple `$var` declarations may alias the same VCD identifier code and therefore the same transition stream.
+6. **Unsupported input fails deliberately.**
+   The initial parser supports a documented VCD subset rather than silently guessing.
+7. **Expected failures are concise.**
+   Normal user errors do not emit Python tracebacks. `--debug` enables tracebacks for development.
 
-The program targets Python 3.11+ and has no runtime dependencies outside the Python standard library.
+## Internal model
 
-This is a deliberate design constraint. A fresh Python installation on a supported Unix-like environment should be enough to run the program.
+The model separates VCD identifier codes from hierarchical names.
 
-The expected building blocks are:
+```text
+identifier code ──────> ValueStream
+                         identifier
+                         width
+                         changes[]
 
-- `argparse` for the command-line interface
-- `bisect` for locating transitions efficiently
-- `curses` for the interactive terminal interface
-- `dataclasses` for the internal model
-- `pathlib` for paths
-- `re` for parsing and matching
-- `typing` for readable interfaces
-- `tomllib` only if configuration files are introduced later
-
-### Terminal first
-
-The interactive interface should work well in an ordinary terminal. It must not require special icon fonts.
-
-Unicode box-drawing and block characters may be used when available, with an ASCII fallback for conservative terminals and captured output.
-
-### Useful without the TUI
-
-The VCD parser and data model must not depend on the interactive interface.
-
-The same executable should support both interactive inspection and non-interactive queries suitable for scripts, examples, tests, and course material.
-
-### Time is the primary axis
-
-The program should preserve actual VCD timestamps rather than treating the trace as a dense array of equally spaced samples.
-
-Signals should be represented as sparse streams of value changes. Navigation, rendering, edge finding, and inspection should operate on those transitions.
-
-### Readability over cleverness
-
-The code should favor explicit data structures and straightforward algorithms. The project is intended to be useful software, but also software that a student can reasonably open and understand.
-
-## Supported VCD model
-
-The first useful version should understand the common subset required for digital RTL simulation traces:
-
-- `$timescale`
-- nested `$scope` / `$upscope`
-- `$var` declarations
-- `$enddefinitions`
-- timestamp records such as `#120`
-- scalar changes: `0`, `1`, `x`, `z`
-- vector changes such as `b0011`
-- initial values in dump sections
-
-Values should preserve unknown and high-impedance states rather than coercing them to integers.
-
-The parser should tolerate ordinary whitespace and identifiers produced by common simulators. Unsupported constructs should fail clearly or be skipped deliberately; they should not silently corrupt the trace.
-
-## Internal data model
-
-A signal has metadata and a sparse transition stream.
+hierarchical name ────> Signal
+                         full_name
+                         reference
+                         width
+                         var_type
+                         stream ─────> ValueStream
+```
 
 Conceptually:
 
 ```text
+Change
+  time: int
+  value: scalar/vector state
+
+ValueStream
+  identifier: str
+  width: int
+  changes: list[Change]
+
 Signal
-  full_name
-  width
-  identifier
-  changes
-    times:  [0, 10, 30, 45, ...]
-    values: [0,  1,  0,  1, ...]
+  full_name: str
+  reference: str
+  width: int
+  var_type: str
+  stream: ValueStream
+
+VCDFile
+  timescale
+  signals
+  identifier -> ValueStream
+  last_time
 ```
 
-The timestamp array remains sorted because the VCD stream is chronological. Operations such as "value at time", "next change", and "previous change" can therefore use binary search.
+If the same identifier code is declared more than once, the declarations share one `ValueStream`. Incompatible widths for the same identifier are an error.
 
-A hierarchy of scopes is retained separately so the interactive signal browser can present the same structure as the trace.
+Identifier codes are treated as opaque non-whitespace strings. They must never be assumed to be numeric or alphanumeric.
 
-## Command-line interface
+## Exact time model
 
-`argparse` is the public front door of the program. `python3 vcdtui.py --help` should provide useful documentation without requiring a separate manual.
+VCD timestamps are stored as raw integer ticks.
 
-The intended commands/options include:
+The parsed timescale is represented exactly, for example:
 
 ```text
-vcdtui.py FILE
-vcdtui.py FILE --list
-vcdtui.py FILE --find PATTERN
-vcdtui.py FILE --signals PATTERN[,PATTERN...]
-vcdtui.py FILE --from TIME
-vcdtui.py FILE --to TIME
-vcdtui.py FILE --dump
-vcdtui.py FILE --ascii
-vcdtui.py FILE --no-color
+10 ps
 ```
 
-### `--list`
-
-Print the available signal names and exit.
-
-### `--find PATTERN`
-
-Print signals whose full names match the query. Initial matching can be case-insensitive substring matching. More forgiving matching may be added later without changing the basic command.
-
-### `--signals`
-
-Restrict the displayed signals. Short names should be convenient when unambiguous; full hierarchical names must always work.
-
-### `--from` and `--to`
-
-Restrict the visible time window. Human-friendly values such as `100ns`, `2us`, and raw VCD ticks should be accepted.
-
-### `--dump`
-
-Render a waveform view to stdout and exit instead of entering the interactive UI.
-
-This mode should be suitable for terminal capture, documentation, pipes, and regression tests.
-
-### `--ascii`
-
-Avoid Unicode drawing characters.
-
-### `--no-color`
-
-Disable color even when the terminal supports it.
-
-## Interactive interface
-
-The default invocation opens the interactive terminal UI.
-
-The screen is divided conceptually into:
+A CLI time such as:
 
 ```text
-+----------------------+---------------------------------------------+
-| signal browser       | waveform area                               |
-|                      |                                             |
-| scopes               | time ruler                                  |
-| selected signals     | traces                                      |
-| visibility toggles   | cursor / markers                            |
-|                      |                                             |
-+----------------------+---------------------------------------------+
-| status / key hints / current time / values                         |
-+--------------------------------------------------------------------+
+1ns
 ```
 
-The exact proportions should adapt to terminal size.
+is converted to ticks with integer/rational arithmetic (`fractions.Fraction` is sufficient). Floating-point arithmetic is not used.
 
-## Signal browser
+Initial policy: if a requested physical time does not fall exactly on a VCD tick, reject it with a concise error rather than rounding.
 
-The left pane presents nested scopes and signals.
+Raw integer CLI times mean raw VCD ticks.
 
-Required interactions:
+## Supported VCD subset: course core
 
-- move selection up/down
-- expand/collapse scopes
-- toggle individual signal visibility
-- search by name
-- add/remove matching signals without restarting the program
+The first qualified parser contract is intentionally narrow.
 
-The user should be able to hide irrelevant internal signals quickly and focus on a small working set.
-
-## Waveform rendering
-
-### Scalar signals
-
-Binary values should be visibly high or low, with transitions connecting them.
-
-Unknown and high-impedance states must have distinct rendering and color.
-
-### Vectors
-
-Buses should be rendered as regions labelled with their current value rather than as one row per bit by default.
-
-Hexadecimal is a useful default for wide vectors, while the value inspector can expose binary and unsigned forms.
-
-### Colors
-
-Colors are functional rather than decorative. A default palette should distinguish at least:
-
-- normal scalar waveform
-- vector value
-- unknown (`X`)
-- high impedance (`Z`)
-- current selection/focus
-- time cursor
-- markers
-- secondary UI text
-
-The palette should remain legible on both dark and light terminal backgrounds by using terminal defaults where practical.
-
-## Navigation
-
-The baseline key map should support both arrow keys and a small set of mnemonic keys.
-
-Planned operations:
-
-- left/right: pan through time
-- up/down: move among signals
-- `+` / `-`: zoom in/out
-- `0`: show the complete trace
-- `/`: search signals
-- `g`: go to a timestamp
-- `Space` or `Enter`: toggle the selected signal, depending on focus
-- `Tab`: change focus between browser and waveform
-- `q`: quit
-- `?`: show help
-
-Key bindings should remain small and discoverable. The bottom status line should expose the most important actions.
-
-## Cursor and event inspection
-
-A movable time cursor is one of the core features.
-
-At the cursor position, the program should be able to show the value of each visible signal and identify changes at that instant.
-
-A focused inspector should make transitions explicit:
+### Supported header/directive behavior
 
 ```text
-Time: 230 ns
-
-signal         before       after
-clk               0           1
-start             0           0
-dec               1           1
-count          0x1         0x0
-stop              0           1
+$date          ignored safely
+$version       ignored safely
+$comment       ignored safely
+$timescale     parsed
+$scope         parsed
+$upscope       parsed
+$var           parsed
+$enddefinitions
+$dumpvars      parsed as a value-change block
 ```
 
-This view is intended to make registered behavior and edge-relative changes easy to reason about.
-
-## Transition navigation
-
-The program should support direct navigation between events rather than requiring manual panning.
-
-Planned commands include:
-
-- next transition of the selected signal
-- previous transition
-- next rising edge
-- previous rising edge
-- next falling edge
-- previous falling edge
-
-These operations are natural consequences of the sparse transition model and should remain efficient even for long traces.
-
-## Markers and timing measurements
-
-A later milestone adds two independent markers.
-
-The status area should show their positions and difference:
+### Supported value changes
 
 ```text
-A = 120 ns    B = 145 ns    delta = 25 ns
+timestamps:        #123
+scalar values:     0 1 x z
+binary vectors:    b0101
 ```
 
-Markers make it easy to measure periods, latencies, pulse widths, and distances between stimulus and response.
+Upper/lower case `X/Z` is normalized.
 
-## Command mode
+Vectors are normalized to their declared width. Short binary values are zero-extended; short values beginning in `x` or `z` are extended with that state. Values wider than the declaration are rejected.
 
-A compact command prompt may be added after the baseline TUI is stable.
-
-Possible commands:
+### Explicitly unsupported initially
 
 ```text
-:goto 120ns
-:find count
-:add stop
-:hide clk
-:zoom 4
+real value changes
+string value changes
+analog extensions
+non-standard/exotic VCD extensions
+runtime dump-control directives beyond the initial $dumpvars block
 ```
 
-This should complement direct key bindings, not replace them.
+Unsupported constructs should produce a clear error identifying the construct.
 
-## Non-interactive rendering
+### Parser robustness requirements
 
-`--dump` should share the same waveform formatting logic as the TUI where practical.
+- directives may span lines;
+- parsing must not depend on line-oriented `$var` declarations;
+- `$var ... $end` is tokenized until its terminating `$end`;
+- identifier codes are opaque strings;
+- nested scopes use a real stack;
+- `$dumpvars ... $end` is handled explicitly;
+- repeated changes at one timestamp resolve deterministically to the last value seen;
+- timestamps must be nondecreasing;
+- malformed scope nesting is rejected;
+- unusual/escaped references must not crash the parser.
 
-Example shape:
+The core compatibility target is the VCD emitted by the qualified simulation baseline. Expanding the subset is allowed only with tests.
+
+## CLI contract
+
+The CLI uses `argparse` and should be useful independently of the TUI.
+
+Course-core commands include:
 
 ```text
-                  100       110       120       130
-clk        ____----____----____----____----
-start      __________------________________
-dec        __________________----__________
-count      | 3 |      2      | 1 |    0   |
-stop       __________________________------
+vcdtui trace.vcd
+vcdtui trace.vcd --list
+vcdtui trace.vcd --find count
+vcdtui trace.vcd --signals clk,start,dec,value,stop --dump
+vcdtui trace.vcd --from 100ns --to 250ns --dump
+vcdtui --version
 ```
 
-Exact glyphs may differ between Unicode and ASCII modes.
-
-Color should be enabled only when appropriate for the output destination and may always be disabled explicitly.
-
-## Error handling
-
-Errors should be concise and actionable.
-
-Examples include:
-
-- file not found
-- malformed VCD declaration
-- unsupported or malformed value change
-- invalid time expression
-- signal pattern matching nothing
-- terminal too small for interactive mode
-
-Normal errors should not produce Python tracebacks unless a debug mode is deliberately introduced.
-
-## Performance expectations
-
-The initial implementation should comfortably handle the relatively small and medium traces commonly produced during RTL development and teaching.
-
-The first implementation may parse the complete file into memory, but it should store only transitions rather than materializing every signal value at every timestamp.
-
-If larger files become important, the architecture should allow later indexing or `mmap`-based access without changing the user interface.
-
-## Testing strategy
-
-Tests use only `unittest` and other standard-library modules.
-
-The suite should cover:
-
-- header parsing
-- nested scopes
-- scalar transitions
-- vector transitions
-- `X` and `Z`
-- timescale conversion
-- value lookup at arbitrary times
-- next/previous transition lookup
-- time expression parsing
-- signal matching
-- CLI argument validation
-- deterministic plain-text waveform rendering
-
-Small VCD fixtures should live in `examples/` or dedicated test fixtures and remain readable by hand.
-
-## Repository shape
-
-The project begins intentionally small:
+Planned options:
 
 ```text
-vcdtui/
-  vcdtui.py
-  README.md
-  DESIGN.md
-  LICENSE
-  examples/
-    counter.vcd
-  tests/
-    test_cli.py
+--list
+--find PATTERN
+-s, --signals PATTERN
+--from TIME
+--to TIME
+--dump
+--ascii
+--no-color
+--version
+--debug
 ```
 
-The single-file implementation is a feature during early development. If the source grows enough that separation improves readability, it can later be split into a small package without changing the command-line experience.
+`--debug` is the only normal mode in which Python tracebacks should be shown.
+
+## Deterministic stdout renderer
+
+`--dump` is a primary interface, not a degraded fallback.
+
+It must be suitable for:
+
+- qualification checks;
+- CI;
+- examples in course material;
+- piping/redirection;
+- terminals where curses is unavailable or undesirable;
+- reproducible snapshots.
+
+`--ascii --no-color` must provide stable, terminal-independent output.
+
+The renderer and TUI must consume the same selected signals and same time model.
+
+## Interactive TTY behavior
+
+Interactive mode requires a usable TTY.
+
+Before initializing curses, the program checks that stdin and stdout are attached to a terminal. If not, it exits cleanly with a message that suggests `--dump`.
+
+The program must not expose errors such as `setupterm` tracebacks during normal use.
+
+## TUI course core
+
+The minimum complete interactive interface contains:
+
+```text
+signal selection
+pan
+zoom
+cursor
+goto time
+next / previous transition
+next / previous rising edge
+next / previous falling edge
+value before / after cursor
+```
+
+Color is part of the normal UI, with graceful fallback when colors are unavailable or disabled.
+
+Suggested semantic use:
+
+```text
+valid scalar waveform   green
+vectors                 cyan
+X                       red
+Z                       magenta
+cursor                  yellow
+selected signal         bold/reverse
+secondary UI            dim/gray where supported
+```
+
+The TUI must not require special fonts. Ordinary Unicode box/wave characters are acceptable, with an ASCII fallback.
+
+## Temporal inspection
+
+Temporal inspection is a core teaching capability, not post-processing polish.
+
+Given a cursor time, the UI should be able to show a compact before/after table:
+
+```text
+              before    after
+start            0         1
+dec              1         1
+value            1         0
+stop             0         1
+```
+
+Navigation should make these operations direct:
+
+```text
+next/previous transition of selected signal
+next/previous rising edge
+next/previous falling edge
+```
+
+The semantics of "before" and "after" must be defined against VCD timestamps and tested. The UI reports evidence from the trace; it does not infer RTL intent.
+
+## Search and signal selection
+
+The first implementation may use deterministic case-insensitive substring search. A third-party fuzzy matching package is not permitted.
+
+Hierarchical signal names should remain visible so similarly named signals in different scopes are distinguishable.
+
+Aliases remain distinct selectable `Signal` objects while sharing one `ValueStream` internally.
+
+## Errors
+
+Expected failures include:
+
+- missing file;
+- malformed VCD;
+- unsupported VCD construct;
+- invalid time specification;
+- physical time not aligned to an exact VCD tick;
+- interactive mode without a TTY;
+- unavailable requested signal.
+
+Normal output format:
+
+```text
+vcdtui: error: concise explanation
+```
+
+No traceback unless `--debug` is active.
+
+## Testing and qualification
+
+Tests use the Python standard library (`unittest`).
+
+The course-core behavior must be testable without curses. In particular, qualification should be able to:
+
+```text
+generate/read a tiny VCD
+run --list
+run --find
+run --signals ... --dump --ascii --no-color
+verify expected signal names, timestamps, and values
+```
+
+The TUI may have separate/manual qualification. Automated qualification must not require simulating terminal keystrokes.
+
+Fixtures should cover at least:
+
+- scalar changes;
+- vectors;
+- x/z states;
+- nested scopes;
+- aliases sharing an identifier code;
+- unusual identifier codes;
+- `$dumpvars` initialization;
+- multiline directives;
+- exact and non-exact physical time conversion;
+- malformed/unsupported input with clean errors.
 
 ## Milestones
 
-### Milestone 0: scaffold
+### M1 — foundations: parser and queries
 
-- repository structure
-- `argparse` CLI
-- project documentation
-- example VCD
-- standard-library test harness
+- Python 3.10+ baseline;
+- internal `ValueStream` / `Signal` alias model;
+- exact timescale representation;
+- supported-subset parser;
+- `--list`;
+- `--find`;
+- `--version`;
+- `--debug`;
+- clean error behavior;
+- parser/query tests.
 
-### Milestone 1: parser and queries
+### M2 — deterministic dump
 
-- declarations and scope hierarchy
-- timescale
-- sparse scalar/vector transitions
-- `--list`
-- `--find`
-- time parsing
+- signal selection;
+- exact `--from` / `--to` ranges;
+- scalar and vector stdout rendering;
+- `--ascii`;
+- `--no-color`;
+- deterministic snapshots suitable for qualification.
 
-### Milestone 2: static waveform output
+### M3 — minimal TUI plus temporal inspection
 
-- signal selection
-- time window selection
-- Unicode renderer
-- ASCII renderer
-- color/no-color behavior
-- `--dump`
+- curses lifecycle and TTY guard;
+- color pairs and fallback;
+- minimal waveform display;
+- cursor;
+- goto;
+- before/after value inspection.
 
-### Milestone 3: interactive TUI
+### M4 — complete course-core navigation
 
-- curses startup/shutdown
-- panes and responsive layout
-- signal browser
-- visibility toggles
-- pan and zoom
-- colors
-- help overlay
+- signal browser/selection;
+- pan and zoom;
+- next/previous transition;
+- next/previous rising edge;
+- next/previous falling edge;
+- help/status UI;
+- robust resize behavior.
 
-### Milestone 4: temporal inspection
+## COURSE CORE COMPLETE
 
-- cursor
-- value-at-time display
-- before/after inspector
-- next/previous transition
-- rising/falling edge navigation
-- goto time
+M1 through M4 define the target capability that may be qualified as part of the teaching toolchain. The project is allowed to stop here and remain complete for its primary purpose.
 
-### Milestone 5: measurement and polish
+## Post-course-core features
 
-- dual markers and delta measurement
-- command prompt
-- optional configuration
-- performance work for larger traces
+These are intentionally outside the core scope and must not block M1–M4:
 
-## Non-goals for the initial releases
+- dual markers and delta-time measurement;
+- command prompt/mode;
+- user configuration files;
+- configurable keybindings;
+- mouse interaction;
+- memory mapping and indexing for very large traces;
+- broader VCD extensions;
+- additional search sophistication.
 
-The first releases do not aim to implement every VCD extension or every workflow surrounding digital simulation.
+If configuration is added while Python 3.10 remains the baseline, it must not introduce a TOML dependency. Standard-library-only remains the stronger constraint.
 
-They also do not require plugin systems, external themes, persistent project databases, or a packaging ecosystem simply to run the viewer.
+## Performance direction
 
-The defining constraint remains simple: one Python program, a VCD file, and a terminal should be enough to inspect a waveform effectively.
+The initial model loads a trace into sparse Python structures. That is appropriate for small and medium instructional traces.
+
+If large-file support later becomes necessary, indexing and `mmap` may be explored without changing the public model. This is post-course-core work.
+
+## Definition of minimum complete
+
+The non-interactive minimum is:
+
+```text
+vcdtui trace.vcd
+vcdtui trace.vcd --list
+vcdtui trace.vcd --find count
+vcdtui trace.vcd --signals clk,start,dec,value,stop --dump
+```
+
+plus an interactive TUI supporting:
+
+```text
+select signals
+pan
+zoom
+cursor
+goto
+next/previous transition
+next/previous rising/falling edge
+value before/after cursor
+```
+
+Anything beyond this should justify its complexity rather than expand the project by default.
