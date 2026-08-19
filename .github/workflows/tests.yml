@@ -108,11 +108,15 @@ jobs:
           python3 vcdtui.py cut.vcd --list
       - name: A closed pipe is not an error
         run: |
-          set -uo pipefail
+          set -u
           # The dump is thousands of lines, so head really does close the pipe.
           test "$(python3 vcdtui.py smoke.vcd --dump --ascii --no-color | wc -l)" -gt 1000
-          python3 vcdtui.py smoke.vcd --dump --ascii --no-color 2> stderr.txt | head -3
+          # The runner's shell is "bash -e", and the deliberate SIGPIPE is
+          # exactly the failure being measured, so read the status by hand.
+          set +e
+          python3 vcdtui.py smoke.vcd --dump --ascii --no-color 2> stderr.txt | head -3 > /dev/null
           status=${PIPESTATUS[0]}
+          set -e
           echo "vcdtui exit status: $status"
           test ! -s stderr.txt
-          case "$status" in 141) ;; *) echo "expected 141 (SIGPIPE)"; exit 1;; esac
+          test "$status" -eq 141
