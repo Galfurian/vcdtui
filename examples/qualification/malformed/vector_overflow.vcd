@@ -1,0 +1,7 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 4 ! bus $end
+$upscope $end
+$enddefinitions $end
+#0
+b111110101 !

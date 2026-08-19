@@ -1,0 +1,12 @@
+$timescale 1 ns $end
+$scope module top $end
+$var reg 1 ! clk $end
+$var reg 4 " count $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+b0 "
+#5
+1!
+b1

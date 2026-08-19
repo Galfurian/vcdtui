@@ -1,0 +1,100 @@
+$comment
+	Captured from Icarus Verilog 12.0, the qualified simulation baseline.
+	Shows $comment and $dumpall before the first timestamp, $dumpoff/$dumpon
+	checkpoints, a real declared as width 1, an event, an integer and a parameter.
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1s
+$end
+$scope module top $end
+$var event 1 ! ev $end
+$var wire 1 " w $end
+$var wire 4 # q [3:0] $end
+$var reg 1 $ clk $end
+$var reg 8 % count [7:0] $end
+$var reg 64 & t [63:0] $end
+$var integer 32 ' i [31:0] $end
+$var real 1 ( r $end
+$scope module u_sub $end
+$var wire 1 $ clk $end
+$var parameter 32 ) WIDTH $end
+$var reg 4 * q [3:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+b100 )
+$end
+#0
+$dumpvars
+bx *
+r1.5 (
+b11111111111111111111111111111101 '
+b101010 &
+b0 %
+0$
+bx #
+0"
+1!
+$end
+#5
+1$
+#10
+1"
+0$
+r2.25 (
+b10100101 %
+#15
+1$
+#20
+$dumpoff
+bx *
+rNaN (
+bx '
+bx &
+bx %
+x$
+bx #
+x"
+$end
+#30
+$dumpon
+bx *
+r2.25 (
+b11111111111111111111111111111101 '
+b101010 &
+b10100101 %
+1$
+bx #
+1"
+1!
+$end
+0$
+#35
+1$
+#40
+$dumpall
+bx *
+r2.25 (
+b11111111111111111111111111111101 '
+b101010 &
+b10100101 %
+1$
+bx #
+1"
+1!
+$end
+0$
+#45
+1$
+#50
+0$
+1!
+#55
+1$
+#60
+0$
