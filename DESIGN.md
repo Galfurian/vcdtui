@@ -391,17 +391,40 @@ The first implementation may use deterministic case-insensitive substring search
 
 Hierarchical signal names should remain visible so similarly named signals in different scopes are distinguishable.
 
-A selector resolves in two tiers, the weaker one used only when the stronger
-finds nothing:
+A selector resolves in tiers, narrowest first, each one used only when the
+previous finds nothing:
 
 ```text
-path       the whole name, or a trailing run of its scopes, anchored at a "."
+name       the whole name, or the whole name with its declared bit range
+path       a trailing run of its scopes, anchored at a "."
 substring  anywhere in the name
 ```
 
 Anchoring is what makes `dut4.clk` mean the `clk` inside `dut4`, while `ut4.clk`
-does not name a path at all. Trying the path tier first means a precise selector
-is never widened by an accidental substring hit elsewhere in the design.
+does not name a path at all. Ordering the tiers means a precise selector is never
+widened: `clk` selects the top-level `clk` when the design has one, and every
+`clk` in the design only when it does not.
+
+### Rooting the view at a scope
+
+`--scope PATH` restricts the trace to one scope and re-roots the names it
+contains. It resolves like a selector, except that ambiguity is fatal, because a
+view has exactly one root and guessing would silently show the wrong instance.
+
+```text
+vcdtui counter.vcd --scope tb_counter -s clk,start,in4
+```
+
+Re-rooting happens once, in `scoped_view`, which returns a `VCDFile` whose
+signals share the original `ValueStream` objects. Everything downstream reads
+`full_name`, so selection, `--list`, `--find`, `--dump` and the tree all agree on
+the shorter names without threading a prefix through them.
+
+Two consequences are deliberate. Inside a scope a leaf name usually resolves in
+the first tier rather than the second, which is what turns six instance-qualified
+selectors into six words. And the prefix is stripped only when `--scope` is
+passed, so the default `--dump` output stays byte-stable for the toolchains that
+consume it as qualification evidence.
 
 A selector matching several signals is not an error: a testbench instantiating
 one module twice has identically named leaves in every scope, and asking for all
