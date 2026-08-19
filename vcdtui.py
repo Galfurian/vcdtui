@@ -15,6 +15,25 @@ from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tupl
 
 __version__ = "0.1.0"
 
+MINIMUM_PYTHON = (3, 10)
+
+
+def python_version_error(version: Sequence[int]) -> Optional[str]:
+    """Return a concise message when ``version`` is too old, else None."""
+    if tuple(version[:2]) >= MINIMUM_PYTHON:
+        return None
+    return (
+        "vcdtui: error: Python {}.{} or newer is required, "
+        "found {}.{}".format(*MINIMUM_PYTHON, *version[:2])
+    )
+
+
+# Checked here rather than in main(): the module body itself uses 3.10 features,
+# so an older interpreter must not reach them and fail with a traceback.
+_VERSION_ERROR = python_version_error(sys.version_info)
+if _VERSION_ERROR is not None:  # pragma: no cover - depends on the interpreter
+    raise SystemExit(_VERSION_ERROR)
+
 
 class VCDTUIError(Exception):
     """Expected user-facing error."""
@@ -35,6 +54,14 @@ _TIME_UNITS = {
 _TIME_UNIT_ORDER = ("s", "ms", "us", "ns", "ps", "fs")
 
 
+def _is_decimal(text: str) -> bool:
+    """True for a nonnegative decimal literal such as "1" or "1.5"."""
+    whole, dot, fraction = text.partition(".")
+    if dot:
+        return whole.isdigit() and fraction.isdigit()
+    return whole.isdigit()
+
+
 @dataclass(frozen=True)
 class TimeScale:
     coefficient: int
@@ -49,18 +76,22 @@ class TimeScale:
         if value.isdigit():
             return int(value)
         for unit in sorted(_TIME_UNITS, key=len, reverse=True):
-            if value.endswith(unit):
-                number = value[: -len(unit)]
-                if not number.isdigit():
-                    break
-                ticks = Fraction(int(number), 1) * _TIME_UNITS[unit] / self.seconds_per_tick
-                if ticks.denominator != 1:
-                    raise VCDTUIError(
-                        f"time {text!r} does not fall exactly on a VCD tick "
-                        f"({self.coefficient}{self.unit})"
-                    )
-                return ticks.numerator
-        raise VCDTUIError(f"invalid time {text!r}; use raw ticks or a unit such as 100ns")
+            if not value.endswith(unit):
+                continue
+            number = value[: -len(unit)]
+            if not _is_decimal(number):
+                break
+            # Fraction parses "1.5" exactly, so fractional times stay off floats.
+            ticks = Fraction(number) * _TIME_UNITS[unit] / self.seconds_per_tick
+            if ticks.denominator != 1:
+                raise VCDTUIError(
+                    f"time {text!r} does not fall exactly on a VCD tick "
+                    f"({self.coefficient}{self.unit})"
+                )
+            return ticks.numerator
+        raise VCDTUIError(
+            f"invalid time {text!r}; use raw ticks or a unit such as 100ns or 1.5us"
+        )
 
     def format_tick(self, tick: int) -> str:
         if tick == 0:
@@ -639,13 +670,14 @@ def resolve_range(vcd: VCDFile, start_text: Optional[str], end_text: Optional[st
     end = vcd.timescale.parse_ticks(end_text) if end_text is not None else vcd.last_time
     if start > end:
         raise VCDTUIError(f"invalid time range: start tick {start} is after end tick {end}")
+    final = f"{vcd.last_time} ({vcd.timescale.format_tick(vcd.last_time)})"
     if start > vcd.last_time:
         raise VCDTUIError(
-            f"range starts at tick {start}, beyond the final VCD timestamp {vcd.last_time}"
+            f"range starts at tick {start}, beyond the final VCD timestamp {final}"
         )
     if end > vcd.last_time:
         raise VCDTUIError(
-            f"range ends at tick {end}, beyond the final VCD timestamp {vcd.last_time}"
+            f"range ends at tick {end}, beyond the final VCD timestamp {final}"
         )
     return start, end
 
@@ -2189,11 +2221,26 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _discard_stdout() -> None:
+    """Point stdout at /dev/null so interpreter shutdown will not flush a dead pipe."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         return run(args, parser)
+    except KeyboardInterrupt:
+        # Quitting with Ctrl-C is normal use, not a crash.
+        return 130
+    except BrokenPipeError:
+        # The reader went away, as in "vcdtui trace.vcd --list | head".
+        _discard_stdout()
+        return 141
     except Exception as exc:
         if args.debug:
             traceback.print_exc()
