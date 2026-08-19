@@ -73,13 +73,13 @@ class TimeScale:
         return f"{tick} ticks"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Change:
     time: int
     value: str
 
 
-@dataclass
+@dataclass(slots=True)
 class ValueStream:
     identifier: str
     width: int
@@ -111,7 +111,7 @@ class ValueStream:
         return self.changes[first:last]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Signal:
     full_name: str
     reference: str

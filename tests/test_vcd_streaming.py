@@ -95,6 +95,12 @@ class StreamingTests(unittest.TestCase):
         stream.pop()
         self.assertEqual(stream.line, 7)
 
+    def test_model_objects_carry_no_instance_dict(self):
+        # One Change exists per value change in the trace, so a per-instance
+        # __dict__ dominates memory. Keep the model on __slots__.
+        for cls in (vcdtui.Change, vcdtui.ValueStream, vcdtui.Signal):
+            self.assertTrue(hasattr(cls, "__slots__"), cls.__name__)
+
     def test_a_large_trace_parses_from_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "big.vcd"
