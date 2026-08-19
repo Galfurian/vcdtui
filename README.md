@@ -39,8 +39,9 @@ Tab                 switch tree / waveform focus
 Up/Down, j/k        move in the focused pane
 Enter               expand/collapse scope
 Space               show/hide signal
-a / A               show all / hide all
-v                   vector format: bin / hex / unsigned / signed
+a, Ctrl+A           show all signals, or hide all when all are shown
+A                   hide all signals
+v                   vector format menu (Up/Down, Enter, Esc)
 
 Left/Right, h/l     move cursor one VCD tick
 Home/End, 0/$       active-range start / end

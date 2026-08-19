@@ -1437,6 +1437,10 @@ def render_timeline_ruler(
     return "".join(labels), "".join(rule)
 
 
+# Ctrl+A arrives as the raw control code, not as a named curses key.
+_CTRL_A = 1
+
+
 def _ctrl_horizontal_direction(curses_module, key: int) -> Optional[bool]:
     """Return False/True for Ctrl+Left/Ctrl+Right when terminfo exposes them."""
     try:
@@ -1479,8 +1483,9 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "  Tab                 switch signal-tree / waveform focus",
         "  Up/Down, j/k        move within the focused pane",
         "  Enter / Space       expand scope / toggle signal",
-        "  a / A               show all / hide all signals",
-        "  v                   value format for focused vector",
+        "  a / Ctrl+A          show all signals, or hide all when all are shown",
+        "  A                   hide all signals",
+        "  v                   value format menu (Up/Down, Enter, Esc)",
         "Time & view",
         f"  {arrows:<20} cursor one VCD tick",
         f"  {ctrl_arrows:<20} previous / next clean binary edge",
@@ -1521,7 +1526,7 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
     arrows = "<- -> cursor" if ascii_only else "←→ cursor"
     ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
     candidates = [
-        ["Tab pane", "Space toggle", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "Space toggle", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
         ["Tab pane", "Space toggle", "v format", arrows, "+/- zoom", "F1/? help", "q quit"],
         ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
         [arrows, "F1/? help", "q quit"],
@@ -1534,39 +1539,104 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
     return "?"[:width]
 
 
+VALUE_FORMAT_CHOICES: Tuple[Tuple[str, str], ...] = (
+    ("binary", "binary"),
+    ("hex", "hexadecimal"),
+    ("unsigned", "unsigned decimal"),
+    ("signed", "signed decimal (two's complement)"),
+)
+
+# Row offset of the first choice in the menu, past the title and its blank line.
+_VALUE_FORMAT_FIRST_ROW = 2
+
+
+def toggle_all_selection(selected: Sequence[bool]) -> List[bool]:
+    """Show every signal, or hide them all when every one is already shown."""
+    return [not all(selected)] * len(selected)
+
+
+def move_menu_index(index: int, count: int, delta: int) -> int:
+    """Move a menu cursor by ``delta``, wrapping at both ends."""
+    if count <= 0:
+        return 0
+    return (index + delta) % count
+
+
+def value_format_index(current: str) -> int:
+    """Menu row for the format in use, or the first row when it is unknown."""
+    for index, (name, _) in enumerate(VALUE_FORMAT_CHOICES):
+        if name == current:
+            return index
+    return 0
+
+
+def value_format_menu_lines(
+    signal: Signal,
+    current: str,
+    highlighted: int,
+    *,
+    ascii_only: bool,
+) -> List[str]:
+    """Render the value-format menu: a cursor to move, and the format in use."""
+    pointer = ">" if ascii_only else "\u25b8"
+    lines = [f"value format: {signal.display_reference}", ""]
+    for index, (name, label) in enumerate(VALUE_FORMAT_CHOICES):
+        cursor = pointer if index == highlighted else " "
+        active = "*" if name == current else " "
+        lines.append(f" {cursor} {active} {label}")
+    up_down = "Up/Down" if ascii_only else "\u2191/\u2193"
+    lines.extend(["", f" {up_down} choose   Enter apply   Esc cancel"])
+    return lines
+
+
 def _prompt_value_format(stdscr, signal: Signal, current: str) -> Optional[str]:
-    """Prompt for one vector signal's presentation radix."""
+    """Prompt for one vector signal's presentation radix.
+
+    The cursor starts on the format in use, so Enter alone is a no-op rather
+    than a surprise.
+    """
     import curses
 
-    options = [
-        ("b", "binary", "binary"),
-        ("x", "hex", "hexadecimal"),
-        ("u", "unsigned", "unsigned decimal"),
-        ("s", "signed", "signed decimal (two's complement)"),
-    ]
-    lines = [f"value format: {signal.display_reference}", ""]
-    for key, name, label in options:
-        marker = "*" if current == name else " "
-        lines.append(f" {marker} [{key}] {label}")
-    lines.extend(["", " Esc cancel"])
-    height, width = stdscr.getmaxyx()
-    content_width = max(len(line) for line in lines)
-    top, left, panel_height, panel_width = _centered_panel_geometry(
-        height, width, content_width, len(lines)
-    )
-    try:
-        panel = curses.newwin(panel_height, panel_width, top, left)
-        panel.keypad(True)
-        panel.erase()
-        panel.box()
-        for row, line in enumerate(lines[: max(0, panel_height - 2)], start=1):
-            _safe_addstr(panel, row, 2, line, curses.A_BOLD if row == 1 else 0)
-        panel.refresh()
-        key = panel.getch()
-    except curses.error:
-        return None
-    mapping = {ord(key): name for key, name, _ in options}
-    return mapping.get(key)
+    ascii_only = not _panel_supports_unicode()
+    highlighted = value_format_index(current)
+    while True:
+        lines = value_format_menu_lines(signal, current, highlighted, ascii_only=ascii_only)
+        height, width = stdscr.getmaxyx()
+        content_width = max(len(line) for line in lines)
+        top, left, panel_height, panel_width = _centered_panel_geometry(
+            height, width, content_width, len(lines)
+        )
+        try:
+            panel = curses.newwin(panel_height, panel_width, top, left)
+            panel.keypad(True)
+            panel.erase()
+            panel.box()
+            for row, line in enumerate(lines[: max(0, panel_height - 2)], start=1):
+                if row == 1:
+                    attr = curses.A_BOLD
+                elif row - 1 == _VALUE_FORMAT_FIRST_ROW + highlighted:
+                    attr = curses.A_REVERSE
+                else:
+                    attr = 0
+                _safe_addstr(panel, row, 2, line, attr)
+            panel.refresh()
+            key = panel.getch()
+        except curses.error:
+            return None
+
+        if key in (curses.KEY_UP, ord("k")):
+            highlighted = move_menu_index(highlighted, len(VALUE_FORMAT_CHOICES), -1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            highlighted = move_menu_index(highlighted, len(VALUE_FORMAT_CHOICES), 1)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            return VALUE_FORMAT_CHOICES[highlighted][0]
+        elif key in (27, ord("q")):
+            return None
+
+
+def _panel_supports_unicode() -> bool:
+    encoding = (getattr(sys.stdout, "encoding", "") or "").lower()
+    return "utf" in encoding
 
 
 def _show_help(stdscr, *, ascii_only: bool) -> None:
@@ -2034,11 +2104,14 @@ def run_tui(
                         state.selected[index] = False
                 continue
 
-            if key == ord("a"):
-                state.selected[:] = [True] * len(all_signals)
+            if key in (ord("a"), _CTRL_A):
+                state.selected[:] = toggle_all_selection(state.selected)
+                shown = sum(state.selected)
+                state.status = "all signals shown" if shown else "all signals hidden"
                 continue
             if key == ord("A"):
                 state.selected[:] = [False] * len(all_signals)
+                state.status = "all signals hidden"
                 continue
             if key in (ord("v"), ord("V")):
                 signal_index = _navigation_signal_index(all_signals, state)
