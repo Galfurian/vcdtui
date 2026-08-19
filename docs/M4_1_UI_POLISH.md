@@ -16,7 +16,11 @@ The left pane contains the hierarchical scope/signal tree. The middle area conta
 
 ## Signal tree
 
-Scopes are represented hierarchically rather than as a flat list. `Enter` expands or collapses the focused scope. Signals retain checkboxes, and `Space` toggles whether the focused signal is displayed.
+Scopes are represented hierarchically rather than as a flat list. `Enter` expands or collapses the focused scope and does nothing else. Signals retain checkboxes, and `Space` toggles whether the focused signal is displayed.
+
+`Space` on a scope toggles every signal at or below it: the group is shown, or hidden when all of it is already shown. Matching is per scope component, so `dut` does not collect the signals of `dut4` and `dut8`.
+
+`Enter` and `Space` are deliberately not interchangeable. `Enter` shapes the tree, `Space` changes what is displayed. Having `Enter` also toggle a signal meant the same key did two unrelated things depending on what happened to be focused.
 
 The tree controls visibility; the displayed waveform list controls temporal navigation for signals that are currently shown.
 

@@ -1540,7 +1540,8 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "Signals",
         "  Tab                 switch signal-tree / waveform focus",
         "  Up/Down, j/k        move within the focused pane",
-        "  Enter / Space       expand scope / toggle signal",
+        "  Enter               expand / collapse the focused scope",
+        "  Space               show/hide the focused signal, or a whole scope",
         "  a / Ctrl+A          show all signals, or hide all when all are shown",
         "  A                   hide all signals",
         "  v                   value format menu (Up/Down, Enter, Esc)",
@@ -1584,8 +1585,8 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
     arrows = "<- -> cursor" if ascii_only else "←→ cursor"
     ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
     candidates = [
-        ["Tab pane", "Space toggle", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
-        ["Tab pane", "Space toggle", "v format", arrows, "+/- zoom", "F1/? help", "q quit"],
+        ["Tab pane", "Space show/hide", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "Space show/hide", "v format", arrows, "+/- zoom", "F1/? help", "q quit"],
         ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
         [arrows, "F1/? help", "q quit"],
         ["F1/? help", "q quit"],
@@ -1606,6 +1607,33 @@ VALUE_FORMAT_CHOICES: Tuple[Tuple[str, str], ...] = (
 
 # Row offset of the first choice in the menu, past the title and its blank line.
 _VALUE_FORMAT_FIRST_ROW = 2
+
+
+def signal_indexes_in_scope(
+    signals: Sequence[Signal],
+    path: Tuple[str, ...],
+) -> List[int]:
+    """Indexes of every signal at or below a scope path.
+
+    Matching is per scope component, so the scope "dut" does not collect the
+    signals of "dut4" and "dut8".
+    """
+    return [
+        index
+        for index, signal in enumerate(signals)
+        if _signal_scope(signal)[: len(path)] == path
+    ]
+
+
+def toggle_scope_selection(selected: Sequence[bool], indexes: Sequence[int]) -> List[bool]:
+    """Show a whole group, or hide it when every signal in it is already shown."""
+    updated = list(selected)
+    if not indexes:
+        return updated
+    target = not all(updated[index] for index in indexes)
+    for index in indexes:
+        updated[index] = target
+    return updated
 
 
 def toggle_all_selection(selected: Sequence[bool]) -> List[bool]:
@@ -2140,21 +2168,35 @@ def run_tui(
                 continue
 
             if key in (ord("\n"), ord("\r"), curses.KEY_ENTER) and state.focus_pane == "tree":
+                # Enter shapes the tree; Space is the only thing that changes
+                # what is shown, so the two can never be confused.
                 item = _tree_focused_item(all_signals, state)
-                if item is not None:
-                    if item.kind == "scope":
-                        if item.path in state.expanded_scopes:
-                            state.expanded_scopes.remove(item.path)
-                        else:
-                            state.expanded_scopes.add(item.path)
-                    elif item.signal_index is not None:
-                        state.selected[item.signal_index] = not state.selected[item.signal_index]
+                if item is None:
+                    continue
+                if item.kind != "scope":
+                    state.status = "press Space to show or hide a signal"
+                    continue
+                if item.path in state.expanded_scopes:
+                    state.expanded_scopes.remove(item.path)
+                else:
+                    state.expanded_scopes.add(item.path)
                 continue
 
             if key == ord(" "):
                 if state.focus_pane == "tree":
                     item = _tree_focused_item(all_signals, state)
-                    if item is not None and item.kind == "signal" and item.signal_index is not None:
+                    if item is None:
+                        continue
+                    if item.kind == "scope":
+                        indexes = signal_indexes_in_scope(all_signals, item.path)
+                        state.selected[:] = toggle_scope_selection(state.selected, indexes)
+                        shown = state.selected[indexes[0]] if indexes else False
+                        scope_name = ".".join(item.path)
+                        state.status = (
+                            f"{scope_name}: {len(indexes)} signals "
+                            f"{'shown' if shown else 'hidden'}"
+                        )
+                    elif item.signal_index is not None:
                         state.selected[item.signal_index] = not state.selected[item.signal_index]
                 else:
                     index = _wave_focused_signal_index(state)
