@@ -60,6 +60,10 @@ i                   before/after inspector
 q                   quit
 ```
 
+`Ctrl+Left` / `Ctrl+Right` are aliases for clean binary-edge navigation when the terminal exposes those modified keys; `e/E` is the portable form.
+
+Vector display format is per signal. The underlying VCD value remains unchanged, and values containing `x` or `z` remain explicit bit patterns instead of being coerced to a number.
+
 ## Selecting signals
 
 `--signals` takes comma-separated selectors. Each is resolved as a path first,
@@ -86,10 +90,6 @@ vcdtui: warning: 'clk' matched 3 signals; select one with its path:
 `--list` prints every full path, one per line, and `--find PATTERN` prints the
 matching ones. Both are pasteable straight back into `--signals`.
 
-`Ctrl+Left` / `Ctrl+Right` are aliases for clean binary-edge navigation when the terminal exposes those modified keys; `e/E` is the portable form.
-
-Vector display format is per signal. The underlying VCD value remains unchanged, and values containing `x` or `z` remain explicit bit patterns instead of being coerced to a number.
-
 ## Deterministic CLI
 
 `--dump` emits a terminal-width-independent event matrix using the same parsed model and exact-time semantics as the TUI. Rows contain range boundaries and timestamps where selected streams change; values are post-change values at that timestamp.
@@ -106,11 +106,30 @@ python3 vcdtui.py trace.vcd \
 
 ## VCD support
 
-The current subset covers nested scopes, aliases, scalar `0/1/x/z`, binary vectors, sparse changes, multiline directives, unusual identifier codes, and exact timescale handling. Real/string values and unsupported extensions fail clearly rather than being guessed.
+The compatibility target is the VCD emitted by Icarus Verilog 12.0, and CI opens
+a trace that Icarus actually wrote on every run.
 
-Hand-readable normal, awkward, and deliberately malformed traces live in `examples/qualification/`.
+```text
+nested scopes, aliases, multiline directives, opaque identifier codes
+scalar 0/1/x/z and binary vectors, normalized to the declared width
+real and string values, kept verbatim and never radix-converted
+$comment anywhere, in the header and between value changes
+$dumpvars, $dumpall, $dumpoff, $dumpon, parsed rather than skipped
+declared bit ranges kept out of the signal name
+exact integer/rational timescale handling
+```
 
-See `DESIGN.md` for the exact parser contract and `docs/` for focused interaction notes.
+A trace whose value changes simply stop is recovered with a warning rather than
+rejected, which is what a simulation killed part way through leaves behind.
+Extended VCD (EVCD) and other extensions are named in the error instead of being
+guessed at.
+
+Hand-readable traces live in `examples/qualification/`: normal ones at the top
+level, `generated/` captured from a real Icarus run, `truncated/` for recovery,
+and `malformed/` for clean failure. Every one of them is exercised by the test
+suite.
+
+See `DESIGN.md` for the exact parser contract, `CHANGELOG.md` for what changed between releases, and `docs/` for focused interaction notes.
 
 ## Requirements
 
