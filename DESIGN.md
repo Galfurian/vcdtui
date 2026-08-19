@@ -144,7 +144,9 @@ is converted to ticks with integer/rational arithmetic (`fractions.Fraction` is 
 
 Initial policy: if a requested physical time does not fall exactly on a VCD tick, reject it with a concise error rather than rounding.
 
-Raw integer CLI times mean raw VCD ticks.
+Raw integer CLI times mean raw VCD ticks. A physical time may be fractional
+(`1.5us`); it is parsed with `Fraction`, so it stays exact and is still rejected
+when it does not land on a tick.
 
 ## Supported VCD subset: course core
 
@@ -361,6 +363,22 @@ The first implementation may use deterministic case-insensitive substring search
 Hierarchical signal names should remain visible so similarly named signals in different scopes are distinguishable.
 
 Aliases remain distinct selectable `Signal` objects while sharing one `ValueStream` internally.
+
+## Process behavior
+
+`vcdtui` is a single command with no runtime dependencies, so it must behave
+like an ordinary Unix filter under ordinary Unix conditions:
+
+```text
+interpreter too old   concise message before any 3.10-only construct is reached
+Ctrl-C                exit 130, no traceback
+closed pipe           exit 141, no traceback, nothing on stderr
+expected failure      exit 2, "vcdtui: error: ..."
+```
+
+`vcdtui trace.vcd --list | head` is normal use, not a crash: the reader closing
+the pipe must not produce a `BrokenPipeError` traceback, nor the interpreter's
+`Exception ignored in sys.stdout` noise at shutdown.
 
 ## Errors
 
