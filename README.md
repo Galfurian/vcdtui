@@ -66,13 +66,13 @@ Vector display format is per signal. The underlying VCD value remains unchanged,
 
 ## Selecting signals
 
-`--signals` takes comma-separated selectors. Each is resolved as a path first,
-then, only if that fails, as a substring:
+`--signals` takes comma-separated selectors, resolved in tiers, narrowest first:
 
 ```text
-tb.dut4.clk     the full hierarchical path
+tb.dut4.clk     the whole name, with or without its [msb:lsb] range
 dut4.clk        a trailing run of scopes, anchored at a "."
-clk             a leaf name: matches it in every scope that has one
+clk             a leaf name: the top-level clk if there is one, else every clk
+in              a substring, only when nothing above matched
 ```
 
 A selector that matches more than one signal is accepted — every clock in a
@@ -89,6 +89,20 @@ vcdtui: warning: 'clk' matched 3 signals; select one with its path:
 
 `--list` prints every full path, one per line, and `--find PATTERN` prints the
 matching ones. Both are pasteable straight back into `--signals`.
+
+### Working inside one instance
+
+`--scope PATH` roots the whole view at one scope: selectors resolve inside it,
+and `--list`, `--find` and `--dump` name signals relative to it.
+
+```bash
+vcdtui counter.vcd --scope tb_counter -s clk,start,dec,in4,value4,stop4
+```
+
+Each name now means one signal, so nothing is ambiguous and nothing has to be
+spelled out twice. `--scope` must name exactly one scope; if a name like
+`regfile` exists in two instances, vcdtui says so and lists both. Without
+`--scope`, names are printed in full exactly as before.
 
 ## Deterministic CLI
 

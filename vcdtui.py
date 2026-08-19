@@ -8,7 +8,7 @@ import os
 import sys
 import traceback
 from bisect import bisect_left, bisect_right
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
@@ -664,6 +664,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", action="store_true", help="list available signals and exit")
     parser.add_argument("--find", metavar="PATTERN", help="find matching signals and exit")
     parser.add_argument(
+        "--scope",
+        metavar="PATH",
+        help="resolve selectors inside PATH and name signals relative to it",
+    )
+    parser.add_argument(
         "-s",
         "--signals",
         metavar="SELECTORS",
@@ -686,6 +691,72 @@ def _require_file(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 def _print_signals(signals: Iterable[Signal]) -> None:
     for signal in signals:
         print(signal.full_name)
+
+
+def scope_paths(vcd: VCDFile) -> List[str]:
+    """Every scope path in the trace, in declaration order and without repeats.
+
+    Derived from the signal names rather than recorded during parsing, so a
+    scope that declares nothing does not show up as a place to look.
+    """
+    paths: Dict[str, None] = {}
+    for signal in vcd.signals:
+        scopes = signal.full_name.split(".")[:-1]
+        for depth in range(1, len(scopes) + 1):
+            paths.setdefault(".".join(scopes[:depth]), None)
+    return list(paths)
+
+
+def resolve_scope(vcd: VCDFile, selector: str) -> str:
+    """Expand a --scope selector to one full scope path.
+
+    Accepts the same forms as a signal selector, except that ambiguity is fatal:
+    a view can only be rooted at one place, so guessing would silently show the
+    wrong instance.
+    """
+    needle = selector.strip().casefold()
+    if not needle:
+        raise VCDTUIError("--scope requires a scope path")
+    paths = scope_paths(vcd)
+    for path in paths:
+        if path.casefold() == needle:
+            return path
+    matches = [path for path in paths if _matches_path(path.casefold(), needle)]
+    if not matches:
+        raise VCDTUIError(
+            f"scope {selector!r} was not found; run --list to see the hierarchy"
+        )
+    if len(matches) > 1:
+        listing = "".join(f"\n  {path}" for path in matches[:_MAX_REPORTED_MATCHES])
+        raise VCDTUIError(
+            f"scope {selector!r} matched {len(matches)} scopes; "
+            f"use a longer path:{listing}"
+        )
+    return matches[0]
+
+
+def scoped_view(vcd: VCDFile, selector: str) -> VCDFile:
+    """Restrict the trace to one scope and re-root the names it contains.
+
+    Everything downstream - selection, --list, --find, --dump, the tree - reads
+    ``full_name``, so re-rooting once here is what keeps the shorter names
+    consistent across all of them. Streams are shared, not copied: the view is a
+    renaming, not a second parse.
+    """
+    root = resolve_scope(vcd, selector)
+    prefix = f"{root}."
+    signals = [
+        replace(signal, full_name=signal.full_name[len(prefix):])
+        for signal in vcd.signals
+        if signal.full_name.startswith(prefix)
+    ]
+    return VCDFile(
+        timescale=vcd.timescale,
+        signals=signals,
+        streams=vcd.streams,
+        last_time=vcd.last_time,
+        warnings=list(vcd.warnings),
+    )
 
 
 def _matches_path(name: str, needle: str) -> bool:
@@ -725,8 +796,10 @@ def select_signals(
 ) -> List[Signal]:
     """Resolve --signals selectors, in declaration order and without duplicates.
 
-    A selector is tried as a path first, then as a substring, so a precise name
-    is never widened by an accidental substring hit elsewhere in the design.
+    Selectors are resolved in tiers, narrowest first: a signal's whole name, then
+    a trailing run of its scopes, then a substring. A precise name is therefore
+    never widened - "clk" means the top-level clk when one exists, and every clk
+    in the design only when it does not.
     """
     if selectors is None:
         if not vcd.signals:
@@ -743,9 +816,15 @@ def select_signals(
         matches = [
             index
             for index, signal in enumerate(vcd.signals)
-            if _matches_path(signal.full_name.casefold(), needle)
-            or _matches_path(signal.display_name.casefold(), needle)
+            if needle in (signal.full_name.casefold(), signal.display_name.casefold())
         ]
+        if not matches:
+            matches = [
+                index
+                for index, signal in enumerate(vcd.signals)
+                if _matches_path(signal.full_name.casefold(), needle)
+                or _matches_path(signal.display_name.casefold(), needle)
+            ]
         if not matches:
             matches = [
                 index
@@ -2398,6 +2477,8 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     vcd = parse_vcd(path)
     for warning in vcd.warnings:
         print(f"vcdtui: warning: {warning}", file=sys.stderr)
+    if args.scope is not None:
+        vcd = scoped_view(vcd, args.scope)
 
     if args.list:
         _print_signals(vcd.signals)
