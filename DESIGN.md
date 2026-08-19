@@ -239,6 +239,7 @@ Unsupported constructs should produce a clear error identifying the construct.
 - repeated changes at one timestamp resolve deterministically to the last value seen;
 - timestamps must be nondecreasing;
 - malformed scope nesting is rejected;
+- a trace whose value changes simply stop is recovered rather than rejected;
 - unusual/escaped references must not crash the parser.
 
 The core compatibility target is the VCD emitted by the qualified simulation baseline. Expanding the subset is allowed only with tests.
@@ -388,6 +389,30 @@ expected failure      exit 2, "vcdtui: error: ..."
 `vcdtui trace.vcd --list | head` is normal use, not a crash: the reader closing
 the pipe must not produce a `BrokenPipeError` traceback, nor the interpreter's
 `Exception ignored in sys.stdout` noise at shutdown.
+
+## Truncated traces
+
+A simulation killed part way through leaves a VCD with a complete header and
+value changes that stop mid-stream. Everything recorded up to that point is
+still true, and it is usually the interesting part, so it is kept:
+
+```text
+vcdtui: warning: trace is truncated at line 56: unexpected end of file
+```
+
+The distinction is between *incomplete* and *malformed*. Only an unexpected end
+of input is recoverable, and only after `$enddefinitions`:
+
+```text
+value changes stop mid-vector          recovered, warning
+$dumpvars block never closed           recovered, warning
+header cut before $enddefinitions      fatal: the identifier map is incomplete
+$end with no dump block open           fatal: malformed, not incomplete
+timestamp that is not a number         fatal: malformed, not incomplete
+```
+
+Warnings go to stderr, never to stdout, and never change the exit code: a
+truncated trace is still a usable trace, and `--dump` output must stay pipeable.
 
 ## Errors
 
