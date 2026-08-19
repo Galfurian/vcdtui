@@ -9,11 +9,9 @@ The project targets Python 3.10+ and has two first-class interfaces:
 
 ## Status
 
-The course core is complete through Milestone 4. M4.1 refines the interactive presentation without changing the parser, exact-time, dump, or temporal-navigation contracts.
+The core parser, exact-time model, deterministic dump, hierarchical signal browser, waveform navigation, markers, and time ruler are implemented. Current work is focused on qualification fixtures and compatibility checks rather than expanding the feature set.
 
-The implementation includes the VCD parser, exact time model, signal queries, deterministic `--dump`, hierarchical interactive signal selection, pan/zoom, an exact cursor, goto, before/after inspection, and transition/edge navigation.
-
-The layers share one model: the interactive UI consumes the same parser, selected signals, sparse transition streams, and exact-time rules used by non-interactive mode.
+The interactive UI and non-interactive commands share the same parsed VCD model, sparse transition streams, signal selection rules, and exact-time semantics.
 
 ## Current commands
 
@@ -48,44 +46,54 @@ The raw `tick` column is the source-of-truth timestamp. The `time` column is an 
 
 Running without `--dump` requires stdin and stdout to be attached to a usable terminal. The program checks this before importing or initializing `curses`; non-interactive commands therefore remain independent of terminal setup.
 
-The main view is deliberately aligned as:
+The main view is aligned as:
 
 ```text
 signal tree | shown @cursor | waveform
 ```
 
+The top of the terminal stays intentionally minimal: current cursor/view information followed by the time ruler. A compact, width-aware shortcut bar lives at the bottom. Press `F1` or `?` for the complete centered control panel.
+
 The tree contains hierarchical scopes and all signals. The middle column lists displayed signals with their exact value at the cursor. The right pane shows their temporal history.
 
-Controls:
+### Controls
 
 ```text
-Tab             switch focus: signal tree / waveform
-Up / Down       move within the focused pane
-j / k           same as Down / Up
-Enter           expand/collapse focused scope in the tree
-Space           show/hide the focused signal
-a / A           show all / hide all signals
+Tab                 switch focus: signal tree / waveform
+Up / Down, j / k    move within the focused pane
+Enter               expand/collapse focused scope
+Space               show/hide focused signal
+a / A               show all / hide all signals
 
-Left / Right    move cursor one VCD tick
-h / l           same as Left / Right
-< / >           pan the waveform viewport
-+ / -           zoom in / out around the cursor
+Left / Right, h / l move cursor one VCD tick
+Ctrl+Left / Right   previous / next clean binary edge when supported
+Home / End          cursor to active range start / end
+0 / $               aliases for Home / End
+g                   goto exact tick or physical time
+< / >               pan waveform viewport
++ / -               zoom in / out around cursor
 
-n / N           next / previous transition
-r / R           next / previous rising edge
-f / F           next / previous falling edge
+n / N               next / previous transition
+e / E               next / previous clean binary edge
+r / R               next / previous rising edge
+f / F               next / previous falling edge
 
-0               cursor to active range start
-$               cursor to active range end
-g               goto exact tick or physical time
-i               show/hide before/after inspector
-?               full key help
-q               quit
+i                   show/hide before/after inspector
+m / M               place or move marker A / B
+c                   clear both markers
+F1 / ?              full centered help
+q                   quit
 ```
 
-Lowercase temporal-navigation keys move forward in time; uppercase variants move backward. Rising and falling edges are recognized only for clean scalar `0 -> 1` and `1 -> 0` transitions. `x` and `z` transitions are not guessed into edges.
+Lowercase temporal-navigation keys move forward in time; uppercase variants move backward. Clean binary edges are only `0 -> 1` and `1 -> 0`. Transitions involving `x` or `z` are never guessed into edges.
 
-The active range is the exact `--from` / `--to` range. Pan and zoom change only the viewport inside that range. Cursor and edge navigation remain exact in raw VCD ticks; when navigation moves outside the current viewport, the viewport recenters without quantizing the cursor.
+Modified Ctrl+arrow sequences vary by terminal, so `e/E` is the portable contract for previous/next clean binary edge.
+
+### Time ruler
+
+The waveform pane includes a deterministic time ruler. Major spacing follows a `1 / 2 / 5 x 10^n` sequence in raw VCD ticks, while displayed physical labels use the exact `TimeScale` formatter.
+
+Pan and zoom change only the viewport inside the active `--from` / `--to` range. Cursor and edge navigation remain exact in raw VCD ticks; when navigation leaves the viewport, the viewport recenters without quantizing the cursor.
 
 ### Waveform representation
 
@@ -98,11 +106,11 @@ falling   ‾‾‾‾\____
 
 ASCII mode uses `-` for the high level. `x` and `z` remain explicit. Vector tracks place their values directly on the trace when an interval has enough columns.
 
-The cursor is non-destructive: the waveform glyph under the cursor is preserved and redrawn with a cursor attribute rather than replaced by a vertical-bar character. A cursor landing on `/`, `\`, or a bus label therefore does not erase the evidence underneath it.
+The cursor and markers are non-destructive: they change cell attributes rather than replacing the waveform glyph underneath them. Landing on `/`, `\`, or a bus label therefore does not erase trace evidence.
 
 ### Before/after inspection
 
-The inspector is hidden by default and toggled with `i`. Its semantics remain:
+The inspector is hidden by default and toggled with `i`:
 
 ```text
 before = last value whose VCD timestamp is strictly less than cursor
@@ -111,13 +119,15 @@ after  = value after all changes at cursor have been applied
 
 A `*` marks signals whose values differ across the cursor timestamp.
 
-## Course-core boundary
+### Markers
 
-Milestones 1 through 4 define the complete teaching-oriented core. M4.1 only improves how that core is presented.
+`m` places or moves marker A; `M` places or moves marker B. The marker table shows post-change values for currently displayed signals. With both markers present:
 
-Dual markers and delta-time measurement are the next small post-core capability. Command mode, configuration files, mouse interaction, and large-file indexing remain optional post-core work and are not required for qualification.
+```text
+delta = B - A
+```
 
-See `docs/M4_COURSE_CORE.md` for navigation semantics and `docs/M4_1_UI_POLISH.md` for the presentation contract.
+The delta is signed and remains exact in raw ticks and physical-time formatting.
 
 ## Requirements
 
@@ -127,7 +137,7 @@ runtime dependencies: none outside the Python standard library
 qualified userspace target: Linux
 ```
 
-Interactive mode additionally requires the standard-library `curses` module available in the qualified Linux Python installation.
+Interactive mode additionally requires the standard-library `curses` module available in the target Python installation.
 
 ## Development checks
 
@@ -138,4 +148,4 @@ python3 vcdtui.py examples/counter.vcd --find count
 python3 vcdtui.py examples/counter.vcd --signals clk,count,stop --dump --ascii --no-color
 ```
 
-See `DESIGN.md` for the project contract, supported VCD subset, data model, exact time rules, TTY behavior, temporal semantics, and milestone boundary.
+See `DESIGN.md` for the parser contract, supported VCD subset, data model, exact-time rules, TTY behavior, and qualification boundary. Focused interaction notes live under `docs/`.
