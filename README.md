@@ -9,11 +9,11 @@ The project targets Python 3.10+ and has two first-class interfaces:
 
 ## Status
 
-The course core is complete through Milestone 4.
+The course core is complete through Milestone 4. M4.1 refines the interactive presentation without changing the parser, exact-time, dump, or temporal-navigation contracts.
 
-The implementation now includes the VCD parser, exact time model, signal queries, deterministic `--dump`, interactive signal selection, pan/zoom, an exact cursor, goto, before/after inspection, and transition/edge navigation.
+The implementation includes the VCD parser, exact time model, signal queries, deterministic `--dump`, hierarchical interactive signal selection, pan/zoom, an exact cursor, goto, before/after inspection, and transition/edge navigation.
 
-The layers intentionally share one model: the interactive UI consumes the same parser, selected signals, sparse transition streams, and exact-time rules used by non-interactive mode.
+The layers share one model: the interactive UI consumes the same parser, selected signals, sparse transition streams, and exact-time rules used by non-interactive mode.
 
 ## Current commands
 
@@ -48,12 +48,22 @@ The raw `tick` column is the source-of-truth timestamp. The `time` column is an 
 
 Running without `--dump` requires stdin and stdout to be attached to a usable terminal. The program checks this before importing or initializing `curses`; non-interactive commands therefore remain independent of terminal setup.
 
-Course-core controls:
+The main view is deliberately aligned as:
 
 ```text
-Up / Down       focus a signal in the browser
+signal tree | shown @cursor | waveform
+```
+
+The tree contains hierarchical scopes and all signals. The middle column lists displayed signals with their exact value at the cursor. The right pane shows their temporal history.
+
+Controls:
+
+```text
+Tab             switch focus: signal tree / waveform
+Up / Down       move within the focused pane
 j / k           same as Down / Up
-Space           show or hide the focused signal
+Enter           expand/collapse focused scope in the tree
+Space           show/hide the focused signal
 a / A           show all / hide all signals
 
 Left / Right    move cursor one VCD tick
@@ -61,43 +71,53 @@ h / l           same as Left / Right
 < / >           pan the waveform viewport
 + / -           zoom in / out around the cursor
 
-n / N           next / previous transition of focused signal
-r / R           next / previous rising edge of focused signal
-f / F           next / previous falling edge of focused signal
+n / N           next / previous transition
+r / R           next / previous rising edge
+f / F           next / previous falling edge
 
 0               cursor to active range start
 $               cursor to active range end
 g               goto exact tick or physical time
+i               show/hide before/after inspector
 ?               full key help
 q               quit
 ```
 
-Lowercase navigation keys move forward in time; uppercase variants move backward. Rising and falling edges are recognized only for clean scalar `0 -> 1` and `1 -> 0` transitions. `x` and `z` transitions are not guessed into edges.
+Lowercase temporal-navigation keys move forward in time; uppercase variants move backward. Rising and falling edges are recognized only for clean scalar `0 -> 1` and `1 -> 0` transitions. `x` and `z` transitions are not guessed into edges.
 
-The active range is the exact `--from` / `--to` range. Pan and zoom change only the viewport inside that range. Cursor and edge navigation remain exact in raw VCD ticks; when navigation moves outside the current viewport, the viewport recenters without changing its span.
+The active range is the exact `--from` / `--to` range. Pan and zoom change only the viewport inside that range. Cursor and edge navigation remain exact in raw VCD ticks; when navigation moves outside the current viewport, the viewport recenters without quantizing the cursor.
 
-At the cursor the TUI shows, for visible selected signals:
+### Waveform representation
+
+Scalar waveforms make transitions visible directly:
 
 ```text
-before -> after
+rising    ____/‾‾‾‾
+falling   ‾‾‾‾\____
 ```
 
-with the precise semantics:
+ASCII mode uses `-` for the high level. `x` and `z` remain explicit. Vector tracks place their values directly on the trace when an interval has enough columns.
+
+The cursor is non-destructive: the waveform glyph under the cursor is preserved and redrawn with a cursor attribute rather than replaced by a vertical-bar character. A cursor landing on `/`, `\`, or a bus label therefore does not erase the evidence underneath it.
+
+### Before/after inspection
+
+The inspector is hidden by default and toggled with `i`. Its semantics remain:
 
 ```text
 before = last value whose VCD timestamp is strictly less than cursor
 after  = value after all changes at cursor have been applied
 ```
 
-A `*` marks signals for which those values differ. This makes simultaneous evidence such as `count: 0001 -> 0000` and `stop: 0 -> 1` directly visible at one timestamp.
-
-The waveform uses `_`/`‾` for scalar low/high states in Unicode mode (`_`/`-` in ASCII mode), `x`/`z` for unknown/high-impedance states, and `=` as a compact vector-state track. A separate vertical cursor overlays the waveform.
+A `*` marks signals whose values differ across the cursor timestamp.
 
 ## Course-core boundary
 
-Milestones 1 through 4 define the complete teaching-oriented core. Features such as dual markers, command mode, configuration files, mouse interaction, and large-file indexing are intentionally post-core and are not required for qualification.
+Milestones 1 through 4 define the complete teaching-oriented core. M4.1 only improves how that core is presented.
 
-See `docs/M4_COURSE_CORE.md` for the navigation semantics and completion boundary.
+Dual markers and delta-time measurement are the next small post-core capability. Command mode, configuration files, mouse interaction, and large-file indexing remain optional post-core work and are not required for qualification.
+
+See `docs/M4_COURSE_CORE.md` for navigation semantics and `docs/M4_1_UI_POLISH.md` for the presentation contract.
 
 ## Requirements
 

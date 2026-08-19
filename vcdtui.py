@@ -11,7 +11,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 __version__ = "0.1.0-dev"
 
@@ -142,14 +142,28 @@ class Inspection:
         return self.before != self.after
 
 
+@dataclass(frozen=True)
+class TreeItem:
+    kind: str
+    label: str
+    depth: int
+    path: Tuple[str, ...]
+    signal_index: Optional[int] = None
+
+
 @dataclass
 class TUIState:
     cursor: int
     view_start: int
     view_end: int
     selected: List[bool]
-    focus_index: int = 0
-    browser_offset: int = 0
+    focus_pane: str = "wave"
+    tree_focus: int = 0
+    tree_offset: int = 0
+    wave_focus: int = 0
+    wave_offset: int = 0
+    expanded_scopes: Set[Tuple[str, ...]] = field(default_factory=set)
+    show_inspector: bool = False
     status: str = ""
 
 
@@ -555,6 +569,56 @@ def _initial_selection(all_signals: Sequence[Signal], initial: Sequence[Signal])
     return [id(signal) in chosen for signal in all_signals]
 
 
+def _signal_scope(signal: Signal) -> Tuple[str, ...]:
+    suffix = "." + signal.reference
+    if signal.full_name.endswith(suffix):
+        prefix = signal.full_name[: -len(suffix)]
+        return tuple(part for part in prefix.split(".") if part)
+    return ()
+
+
+def all_scope_paths(signals: Sequence[Signal]) -> Set[Tuple[str, ...]]:
+    paths: Set[Tuple[str, ...]] = set()
+    for signal in signals:
+        scope = _signal_scope(signal)
+        for depth in range(1, len(scope) + 1):
+            paths.add(scope[:depth])
+    return paths
+
+
+def build_tree_items(
+    signals: Sequence[Signal],
+    expanded_scopes: Set[Tuple[str, ...]],
+) -> List[TreeItem]:
+    children: Dict[Tuple[str, ...], List[str]] = {}
+    members: Dict[Tuple[str, ...], List[int]] = {}
+
+    for index, signal in enumerate(signals):
+        scope = _signal_scope(signal)
+        parent: Tuple[str, ...] = ()
+        for component in scope:
+            bucket = children.setdefault(parent, [])
+            if component not in bucket:
+                bucket.append(component)
+            parent = parent + (component,)
+        members.setdefault(parent, []).append(index)
+
+    items: List[TreeItem] = []
+
+    def visit(parent: Tuple[str, ...], depth: int) -> None:
+        for component in children.get(parent, []):
+            path = parent + (component,)
+            items.append(TreeItem("scope", component, depth, path))
+            if path in expanded_scopes:
+                visit(path, depth + 1)
+        for index in members.get(parent, []):
+            signal = signals[index]
+            items.append(TreeItem("signal", signal.reference, depth, parent, index))
+
+    visit((), 0)
+    return items
+
+
 def _event_times(signals: Sequence[Signal], start: int, end: int) -> List[int]:
     times = {start, end}
     seen_streams = set()
@@ -670,6 +734,7 @@ def sample_waveform(
     *,
     ascii_only: bool,
 ) -> str:
+    """Legacy compact state sampling kept for deterministic tests/API compatibility."""
     ticks = _sample_ticks(start, end, width)
     output: List[str] = []
     for tick in ticks:
@@ -690,10 +755,98 @@ def sample_waveform(
     return "".join(output)
 
 
+def render_scalar_track(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+) -> str:
+    ticks = _sample_ticks(start, end, width)
+    output: List[str] = []
+    previous: Optional[str] = None
+    for tick in ticks:
+        value = signal.stream.value_at(tick)
+        if previous == "0" and value == "1":
+            char = "/"
+        elif previous == "1" and value == "0":
+            char = "\\"
+        elif value is None:
+            char = "?"
+        elif "x" in value:
+            char = "x"
+        elif "z" in value:
+            char = "z"
+        elif value == "1":
+            char = "-" if ascii_only else "‾"
+        else:
+            char = "_"
+        output.append(char)
+        previous = value
+    return "".join(output)
+
+
+def render_bus_track(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+) -> str:
+    if width <= 0:
+        return ""
+    ticks = _sample_ticks(start, end, width)
+    values = [signal.stream.value_at(tick) or "?" for tick in ticks]
+    horizontal = "-" if ascii_only else "─"
+    boundary = "|" if ascii_only else "│"
+    line = [horizontal] * width
+
+    run_start = 0
+    while run_start < width:
+        value = values[run_start]
+        run_end = run_start + 1
+        while run_end < width and values[run_end] == value:
+            run_end += 1
+        if run_start > 0:
+            line[run_start] = boundary
+        content_start = run_start + (1 if run_start > 0 else 0)
+        available = max(0, run_end - content_start)
+        if available > 0:
+            label = value[:available]
+            label_start = content_start + max(0, (available - len(label)) // 2)
+            for offset, char in enumerate(label):
+                if label_start + offset < run_end:
+                    line[label_start + offset] = char
+        run_start = run_end
+    return "".join(line)
+
+
+def render_waveform_track(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+) -> str:
+    if signal.width == 1:
+        return render_scalar_track(signal, start, end, width, ascii_only=ascii_only)
+    return render_bus_track(signal, start, end, width, ascii_only=ascii_only)
+
+
 def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
     if width <= 1 or start == end:
         return 0
     return min(width - 1, max(0, ((cursor - start) * (width - 1)) // (end - start)))
+
+
+def cursor_track_glyph(track: str, column: int) -> str:
+    """Return the original track glyph under the cursor; the UI only changes attributes."""
+    if not track:
+        return " "
+    return track[min(max(0, column), len(track) - 1)]
 
 
 def _safe_addstr(window, y: int, x: int, text: str, attr: int = 0) -> None:
@@ -722,7 +875,11 @@ def _prompt_goto(stdscr, vcd: VCDFile, start: int, end: int, status_row: int) ->
     stdscr.refresh()
     curses.echo()
     try:
-        raw = stdscr.getstr(status_row, min(len(prompt), max(0, width - 2)), max(1, width - len(prompt) - 2))
+        raw = stdscr.getstr(
+            status_row,
+            min(len(prompt), max(0, width - 2)),
+            max(1, width - len(prompt) - 2),
+        )
     finally:
         curses.noecho()
     try:
@@ -741,10 +898,16 @@ def _prompt_goto(stdscr, vcd: VCDFile, start: int, end: int, status_row: int) ->
 
 
 def _init_curses_colors(curses, enabled: bool) -> Dict[str, int]:
-    attrs = {"scalar": 0, "vector": 0, "bad": 0, "cursor": 0, "dim": 0, "focus": 0}
+    attrs = {
+        "scalar": 0,
+        "vector": 0,
+        "bad": 0,
+        "cursor": curses.A_REVERSE | curses.A_BOLD,
+        "dim": curses.A_DIM,
+        "focus": curses.A_REVERSE,
+        "scope": curses.A_BOLD,
+    }
     if not enabled or not curses.has_colors():
-        attrs["focus"] = curses.A_REVERSE
-        attrs["dim"] = curses.A_DIM
         return attrs
     try:
         curses.start_color()
@@ -757,59 +920,56 @@ def _init_curses_colors(curses, enabled: bool) -> Dict[str, int]:
             scalar=curses.color_pair(1),
             vector=curses.color_pair(2),
             bad=curses.color_pair(3),
-            cursor=curses.color_pair(4) | curses.A_BOLD,
-            dim=curses.A_DIM,
-            focus=curses.A_REVERSE,
+            cursor=curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD,
+            scope=curses.color_pair(2) | curses.A_BOLD,
         )
     except curses.error:
-        return {
-            "scalar": 0,
-            "vector": 0,
-            "bad": 0,
-            "cursor": curses.A_BOLD,
-            "dim": curses.A_DIM,
-            "focus": curses.A_REVERSE,
-        }
+        pass
     return attrs
 
 
-def _ensure_browser_focus(state: TUIState, capacity: int, count: int) -> None:
+def _ensure_offset(focus: int, offset: int, capacity: int, count: int) -> Tuple[int, int]:
     if count <= 0:
-        state.focus_index = 0
-        state.browser_offset = 0
-        return
-    state.focus_index = min(max(0, state.focus_index), count - 1)
+        return 0, 0
+    focus = min(max(0, focus), count - 1)
     if capacity <= 0:
-        state.browser_offset = state.focus_index
-        return
-    if state.focus_index < state.browser_offset:
-        state.browser_offset = state.focus_index
-    elif state.focus_index >= state.browser_offset + capacity:
-        state.browser_offset = state.focus_index - capacity + 1
-    max_offset = max(0, count - capacity)
-    state.browser_offset = min(max(0, state.browser_offset), max_offset)
+        return focus, focus
+    if focus < offset:
+        offset = focus
+    elif focus >= offset + capacity:
+        offset = focus - capacity + 1
+    offset = min(max(0, offset), max(0, count - capacity))
+    return focus, offset
+
+
+def _visible_signal_indexes(state: TUIState) -> List[int]:
+    return [index for index, enabled in enumerate(state.selected) if enabled]
 
 
 def _show_help(stdscr) -> None:
     import curses
 
     lines = [
-        "vcdtui course-core keys",
+        "vcdtui keys",
         "",
-        "Up/Down        focus signal in browser",
+        "Tab            switch focus: signal tree / waveform",
+        "Up/Down j/k    move within focused pane",
+        "Enter          expand/collapse scope in tree",
         "Space          show/hide focused signal",
         "a / A          show all / hide all signals",
-        "Left/Right     move cursor by one VCD tick",
+        "Left/Right h/l move cursor by one VCD tick",
         "< / >          pan waveform viewport",
         "+ / -          zoom in / out around cursor",
-        "n / N          next / previous transition (focused signal)",
-        "r / R          next / previous rising edge (focused signal)",
-        "f / F          next / previous falling edge (focused signal)",
+        "n / N          next / previous transition",
+        "r / R          next / previous rising edge",
+        "f / F          next / previous falling edge",
         "0 / $          cursor to active range start / end",
         "g              goto exact tick or physical time",
+        "i              show/hide before/after inspector",
         "?              this help",
         "q              quit",
         "",
+        "Lowercase temporal keys move forward; uppercase move backward.",
         "Any key returns.",
     ]
     stdscr.erase()
@@ -817,10 +977,22 @@ def _show_help(stdscr) -> None:
     for row, line in enumerate(lines[: max(0, height - 1)]):
         attr = curses.A_BOLD if row == 0 else 0
         _safe_addstr(stdscr, row, 0, line, attr)
-    if width < 48 and height > 0:
+    if width < 56 and height > 0:
         _safe_addstr(stdscr, height - 1, 0, "resize wider for full help")
     stdscr.refresh()
     stdscr.getch()
+
+
+def _draw_ruler(stdscr, vcd: VCDFile, state: TUIState, x: int, width: int, attrs: Dict[str, int]) -> None:
+    if width <= 4:
+        return
+    left = vcd.timescale.format_tick(state.view_start)
+    right = vcd.timescale.format_tick(state.view_end)
+    _safe_addstr(stdscr, 2, x, left, attrs["dim"])
+    _safe_addstr(stdscr, 2, x + max(0, width - len(right)), right, attrs["dim"])
+    if state.view_start <= state.cursor <= state.view_end:
+        col = _cursor_column(state.cursor, state.view_start, state.view_end, width)
+        _safe_addstr(stdscr, 2, x + col, "^", attrs["cursor"])
 
 
 def _draw_tui(
@@ -840,111 +1012,146 @@ def _draw_tui(
     height, width = stdscr.getmaxyx()
     title = (
         f"vcdtui cursor={state.cursor} ({vcd.timescale.format_tick(state.cursor)}) "
-        f"view={state.view_start}..{state.view_end} range={range_start}..{range_end}"
+        f"view={state.view_start}..{state.view_end}"
     )
     _safe_addstr(stdscr, 0, 0, title, curses.A_BOLD)
     _safe_addstr(
         stdscr,
         1,
         0,
-        "Up/Down signal  Space toggle  Left/Right cursor  +/- zoom  </> pan  n/r/f edges  ? help",
+        "Tab pane  Space toggle  arrows cursor/tree  +/- zoom  </> pan  n/r/f edges  i inspect  ? help",
         attrs["dim"],
     )
 
-    if height < 12 or width < 60:
-        _safe_addstr(stdscr, 3, 0, "terminal too small; resize to at least 60x12")
+    if height < 12 or width < 72:
+        _safe_addstr(stdscr, 3, 0, "terminal too small; resize to at least 72x12")
         if state.status:
             _safe_addstr(stdscr, height - 1, 0, state.status)
         stdscr.refresh()
         return
 
-    browser_width = min(42, max(22, width // 3))
-    split_x = browser_width
-    wave_x = split_x + 2
+    tree_width = min(34, max(22, width // 4))
+    meta_width = min(28, max(18, width // 5))
+    divider1_x = tree_width
+    meta_x = divider1_x + 2
+    divider2_x = meta_x + meta_width
+    wave_x = divider2_x + 2
     wave_width = max(8, width - wave_x - 1)
-    browser_capacity = max(1, height - 5)
-    _ensure_browser_focus(state, browser_capacity, len(all_signals))
+
+    inspector_height = 0
+    if state.show_inspector:
+        inspector_height = min(8, max(5, height // 3))
+    main_bottom = height - 2 - inspector_height
+    main_capacity = max(1, main_bottom - 4)
+
+    tree_items = build_tree_items(all_signals, state.expanded_scopes)
+    state.tree_focus, state.tree_offset = _ensure_offset(
+        state.tree_focus,
+        state.tree_offset,
+        main_capacity,
+        len(tree_items),
+    )
+
+    visible_indexes = _visible_signal_indexes(state)
+    state.wave_focus, state.wave_offset = _ensure_offset(
+        state.wave_focus,
+        state.wave_offset,
+        main_capacity,
+        len(visible_indexes),
+    )
 
     _safe_addstr(stdscr, 3, 0, "signals", curses.A_BOLD)
+    _safe_addstr(stdscr, 3, meta_x, "shown @cursor", curses.A_BOLD)
     _safe_addstr(stdscr, 3, wave_x, "waveform", curses.A_BOLD)
+    _draw_ruler(stdscr, vcd, state, wave_x, wave_width, attrs)
+
     divider = "|" if ascii_only else "│"
-    for row in range(3, height - 1):
-        _safe_addstr(stdscr, row, split_x, divider, attrs["dim"])
+    for row in range(3, main_bottom + 1):
+        _safe_addstr(stdscr, row, divider1_x, divider, attrs["dim"])
+        _safe_addstr(stdscr, row, divider2_x, divider, attrs["dim"])
 
-    end_index = min(len(all_signals), state.browser_offset + browser_capacity)
-    for row, index in enumerate(range(state.browser_offset, end_index), start=4):
-        signal = all_signals[index]
-        checked = "x" if state.selected[index] else " "
-        prefix = f"[{checked}] "
-        room = max(1, browser_width - len(prefix) - 1)
-        name = signal.full_name
-        if len(name) > room:
-            name = "…" + name[-(room - 1) :] if not ascii_only and room > 1 else name[-room:]
-        attr = attrs["focus"] if index == state.focus_index else 0
-        _safe_addstr(stdscr, row, 0, prefix + name, attr)
+    tree_end = min(len(tree_items), state.tree_offset + main_capacity)
+    for row, item_index in enumerate(range(state.tree_offset, tree_end), start=4):
+        item = tree_items[item_index]
+        indent = "  " * item.depth
+        if item.kind == "scope":
+            is_open = item.path in state.expanded_scopes
+            arrow = ("v" if is_open else ">") if ascii_only else ("▼" if is_open else "▶")
+            text = f"{indent}{arrow} {item.label}"
+            attr = attrs["scope"]
+        else:
+            assert item.signal_index is not None
+            checked = "x" if state.selected[item.signal_index] else " "
+            text = f"{indent}[{checked}] {item.label}"
+            attr = 0
+        if state.focus_pane == "tree" and item_index == state.tree_focus:
+            attr |= attrs["focus"]
+        _safe_addstr(stdscr, row, 0, text, attr)
 
-    visible = selected_signals(all_signals, state.selected)
-    right_height = height - 5
-    wave_rows = max(1, right_height // 2)
-    shown = visible[:wave_rows]
+    wave_end = min(len(visible_indexes), state.wave_offset + main_capacity)
+    shown_indexes = visible_indexes[state.wave_offset:wave_end]
     cursor_in_view = state.view_start <= state.cursor <= state.view_end
-    cursor_char = "|" if ascii_only else "│"
 
-    row = 4
-    if not shown:
-        _safe_addstr(stdscr, row, wave_x, "no signals selected; use Space in the browser", attrs["dim"])
-    for signal in shown:
-        label_width = min(18, max(8, wave_width // 4))
-        track_width = max(4, wave_width - label_width - 2)
-        label = signal.reference
-        if len(label) > label_width:
-            label = label[-label_width:]
-        wave = list(
-            sample_waveform(
-                signal,
+    if not shown_indexes:
+        _safe_addstr(stdscr, 4, meta_x, "no signals selected", attrs["dim"])
+    for row, visible_pos in enumerate(range(state.wave_offset, wave_end), start=4):
+        signal_index = visible_indexes[visible_pos]
+        signal = all_signals[signal_index]
+        value = signal.stream.value_at(state.cursor) or "?"
+        value_room = min(max(signal.width, 1), 10)
+        name_room = max(4, meta_width - value_room - 2)
+        name = signal.reference
+        if len(name) > name_room:
+            name = ("…" + name[-(name_room - 1):]) if not ascii_only and name_room > 1 else name[-name_room:]
+        meta = f"{name:<{name_room}} {value:>{value_room}}"
+        meta_attr = 0
+        if state.focus_pane == "wave" and visible_pos == state.wave_focus:
+            meta_attr |= attrs["focus"]
+        _safe_addstr(stdscr, row, meta_x, meta, meta_attr)
+
+        track = render_waveform_track(
+            signal,
+            state.view_start,
+            state.view_end,
+            wave_width,
+            ascii_only=ascii_only,
+        )
+        track_attr = attrs["vector"] if signal.width > 1 else attrs["scalar"]
+        if "x" in value or "z" in value:
+            track_attr = attrs["bad"]
+        _safe_addstr(stdscr, row, wave_x, track, track_attr)
+        if cursor_in_view and track:
+            cursor_col = _cursor_column(
+                state.cursor,
                 state.view_start,
                 state.view_end,
-                track_width,
-                ascii_only=ascii_only,
+                wave_width,
             )
-        )
-        track_cursor_col: Optional[int] = None
-        if cursor_in_view:
-            track_cursor_col = _cursor_column(
-                state.cursor, state.view_start, state.view_end, track_width
-            )
-            if wave:
-                wave[track_cursor_col] = cursor_char
-        value = signal.stream.value_at(state.cursor) or "?"
-        attr = attrs["vector"] if signal.width > 1 else attrs["scalar"]
-        if "x" in value or "z" in value:
-            attr = attrs["bad"]
-        _safe_addstr(stdscr, row, wave_x, label.rjust(label_width), attrs["dim"])
-        track_x = wave_x + label_width + 1
-        _safe_addstr(stdscr, row, track_x, "".join(wave), attr)
-        if track_cursor_col is not None:
-            _safe_addstr(stdscr, row, track_x + track_cursor_col, cursor_char, attrs["cursor"])
-        row += 1
+            glyph = cursor_track_glyph(track, cursor_col)
+            _safe_addstr(stdscr, row, wave_x + cursor_col, glyph, attrs["cursor"])
 
-    inspector_row = max(row + 1, 4 + wave_rows + 1)
-    if inspector_row < height - 2:
-        _safe_addstr(stdscr, inspector_row, wave_x, "at cursor: before -> after", curses.A_BOLD)
-        inspector_row += 1
-        for item in inspect_at(shown, state.cursor):
-            if inspector_row >= height - 1:
+    if state.show_inspector:
+        inspector_top = main_bottom + 1
+        rule = "-" if ascii_only else "─"
+        _safe_addstr(stdscr, inspector_top, 0, rule * max(1, width - 1), attrs["dim"])
+        _safe_addstr(stdscr, inspector_top + 1, 0, "inspection: before -> after", curses.A_BOLD)
+        inspect_signals = [all_signals[index] for index in shown_indexes]
+        for offset, item in enumerate(inspect_at(inspect_signals, state.cursor), start=2):
+            row = inspector_top + offset
+            if row >= height - 1:
                 break
             before = item.before or "?"
             after = item.after or "?"
             marker = "*" if item.changed else " "
-            text = f"{marker} {item.signal.reference:<16} {before:>8} -> {after:<8}"
+            text = f"{marker} {item.signal.reference:<22} {before:>10} -> {after:<10}"
             attr = curses.A_BOLD if item.changed else 0
-            _safe_addstr(stdscr, inspector_row, wave_x, text, attr)
-            inspector_row += 1
+            _safe_addstr(stdscr, row, 0, text, attr)
 
-    selected_count = sum(1 for enabled in state.selected if enabled)
-    focus_name = all_signals[state.focus_index].full_name if all_signals else "-"
+    selected_count = len(visible_indexes)
+    pane = state.focus_pane
     status = state.status or (
-        f"selected {selected_count}/{len(all_signals)} | focused {focus_name} | q quit"
+        f"pane={pane} | selected {selected_count}/{len(all_signals)} | "
+        f"range {range_start}..{range_end} | q quit"
     )
     _safe_addstr(stdscr, height - 1, 0, status)
     stdscr.refresh()
@@ -964,6 +1171,31 @@ def _move_to_time(
         range_start,
         range_end,
     )
+
+
+def _tree_focused_item(signals: Sequence[Signal], state: TUIState) -> Optional[TreeItem]:
+    items = build_tree_items(signals, state.expanded_scopes)
+    if not items:
+        return None
+    state.tree_focus = min(max(0, state.tree_focus), len(items) - 1)
+    return items[state.tree_focus]
+
+
+def _wave_focused_signal_index(state: TUIState) -> Optional[int]:
+    indexes = _visible_signal_indexes(state)
+    if not indexes:
+        return None
+    state.wave_focus = min(max(0, state.wave_focus), len(indexes) - 1)
+    return indexes[state.wave_focus]
+
+
+def _navigation_signal_index(signals: Sequence[Signal], state: TUIState) -> Optional[int]:
+    if state.focus_pane == "tree":
+        item = _tree_focused_item(signals, state)
+        if item is not None and item.kind == "signal":
+            return item.signal_index
+        return None
+    return _wave_focused_signal_index(state)
 
 
 def run_tui(
@@ -996,6 +1228,7 @@ def run_tui(
             view_start=start,
             view_end=end,
             selected=_initial_selection(all_signals, initial_signals),
+            expanded_scopes=all_scope_paths(all_signals),
         )
         while True:
             _draw_tui(
@@ -1010,19 +1243,60 @@ def run_tui(
             )
             state.status = ""
             key = stdscr.getch()
+
             if key in (ord("q"), ord("Q")):
                 return
+            if key == ord("\t"):
+                state.focus_pane = "tree" if state.focus_pane == "wave" else "wave"
+                continue
+
             if key in (curses.KEY_UP, ord("k")):
-                state.focus_index = max(0, state.focus_index - 1)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                state.focus_index = min(len(all_signals) - 1, state.focus_index + 1)
-            elif key == ord(" "):
-                state.selected[state.focus_index] = not state.selected[state.focus_index]
-            elif key == ord("a"):
+                if state.focus_pane == "tree":
+                    state.tree_focus = max(0, state.tree_focus - 1)
+                else:
+                    state.wave_focus = max(0, state.wave_focus - 1)
+                continue
+            if key in (curses.KEY_DOWN, ord("j")):
+                if state.focus_pane == "tree":
+                    state.tree_focus += 1
+                else:
+                    state.wave_focus += 1
+                continue
+
+            if key in (ord("\n"), ord("\r"), curses.KEY_ENTER) and state.focus_pane == "tree":
+                item = _tree_focused_item(all_signals, state)
+                if item is not None:
+                    if item.kind == "scope":
+                        if item.path in state.expanded_scopes:
+                            state.expanded_scopes.remove(item.path)
+                        else:
+                            state.expanded_scopes.add(item.path)
+                    elif item.signal_index is not None:
+                        state.selected[item.signal_index] = not state.selected[item.signal_index]
+                continue
+
+            if key == ord(" "):
+                if state.focus_pane == "tree":
+                    item = _tree_focused_item(all_signals, state)
+                    if item is not None and item.kind == "signal" and item.signal_index is not None:
+                        state.selected[item.signal_index] = not state.selected[item.signal_index]
+                else:
+                    index = _wave_focused_signal_index(state)
+                    if index is not None:
+                        state.selected[index] = False
+                continue
+
+            if key == ord("a"):
                 state.selected[:] = [True] * len(all_signals)
-            elif key == ord("A"):
+                continue
+            if key == ord("A"):
                 state.selected[:] = [False] * len(all_signals)
-            elif key in (curses.KEY_LEFT, ord("h")):
+                continue
+            if key == ord("i"):
+                state.show_inspector = not state.show_inspector
+                continue
+
+            if key in (curses.KEY_LEFT, ord("h")):
                 _move_to_time(state, state.cursor - 1, start, end)
             elif key in (curses.KEY_RIGHT, ord("l")):
                 _move_to_time(state, state.cursor + 1, start, end)
@@ -1071,7 +1345,11 @@ def run_tui(
                     forward=True,
                 )
             elif key in (ord("n"), ord("N"), ord("r"), ord("R"), ord("f"), ord("F")):
-                signal = all_signals[state.focus_index]
+                signal_index = _navigation_signal_index(all_signals, state)
+                if signal_index is None:
+                    state.status = "select/focus a signal before temporal navigation"
+                    continue
+                signal = all_signals[signal_index]
                 forward = chr(key).islower()
                 if key in (ord("n"), ord("N")):
                     tick = next_transition(signal.stream, state.cursor, forward=forward)
@@ -1086,7 +1364,10 @@ def run_tui(
                     state.status = f"no {'next' if forward else 'previous'} {label} for {signal.full_name}"
                 else:
                     _move_to_time(state, tick, start, end)
-                    state.status = f"{label}: {signal.full_name} @ {tick} ({vcd.timescale.format_tick(tick)})"
+                    state.status = (
+                        f"{label}: {signal.full_name} @ {tick} "
+                        f"({vcd.timescale.format_tick(tick)})"
+                    )
             elif key == curses.KEY_RESIZE:
                 continue
             elif key == ord("?"):
