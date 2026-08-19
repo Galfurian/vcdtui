@@ -103,3 +103,9 @@ python3 -m unittest discover -s tests -v
 python3 vcdtui.py examples/qualification/showcase.vcd --list
 python3 vcdtui.py examples/qualification/showcase.vcd --dump --ascii --no-color
 ```
+
+CI runs the suite on Python 3.10 through 3.13, asserts that `vcdtui.py` imports
+nothing outside the standard library and still runs under `env -i`, and then
+simulates a design with Icarus Verilog 12.0 and opens the trace it produces.
+That last job is the point: a viewer that passes its own tests but cannot read
+what the simulator actually writes is not working.

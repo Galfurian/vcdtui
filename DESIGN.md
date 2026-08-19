@@ -463,6 +463,19 @@ No traceback unless `--debug` is active.
 
 Tests use the Python standard library (`unittest`).
 
+Qualification is not only "the tests pass". Continuous integration also has to
+answer the question the tests cannot ask themselves:
+
+```text
+unittest matrix      3.10 through 3.13
+standard library     no import outside it; runs under env -i
+simulator end to end  simulate with the qualified baseline, open the result
+```
+
+The last one is the one that matters. A viewer whose own tests pass but which
+cannot read what the simulator actually writes is not working, and only a real
+simulator run can tell the difference.
+
 The course-core behavior must be testable without curses. In particular, qualification should be able to:
 
 ```text
