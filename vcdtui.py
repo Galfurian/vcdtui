@@ -43,6 +43,14 @@ class VCDParseError(VCDTUIError):
     """Malformed or unsupported VCD input."""
 
 
+class VCDTruncatedError(VCDParseError):
+    """The input ended while a construct was still being read.
+
+    Distinguished from other parse errors because a trace whose value changes
+    simply stop is recoverable, while malformed input is not.
+    """
+
+
 _TIME_UNITS = {
     "s": Fraction(1, 1),
     "ms": Fraction(1, 1_000),
@@ -162,12 +170,13 @@ class Signal:
         return f"{self.reference}{self.bit_range}"
 
 
-@dataclass
+@dataclass(slots=True)
 class VCDFile:
     timescale: TimeScale
     signals: List[Signal]
     streams: Dict[str, ValueStream]
     last_time: int = 0
+    warnings: List[str] = field(default_factory=list)
 
     def find(self, pattern: str) -> List[Signal]:
         needle = pattern.casefold()
@@ -242,7 +251,7 @@ class TokenStream:
     def pop(self) -> str:
         item = self._lookahead()
         if item is None:
-            raise VCDParseError("unexpected end of file")
+            raise VCDTruncatedError("unexpected end of file")
         self._pending = None
         token, self.line = item
         return token
@@ -425,7 +434,40 @@ def _apply_value_change(
         _adopt_kind(stream, "string")
         stream.add(time, raw)
         return
+    if ts.done():
+        # A trace cut mid-token leaves a fragment such as a lone "0" or "b101".
+        raise VCDTruncatedError(f"unexpected end of file after {token!r}")
     raise VCDParseError(f"unsupported value-change token {token!r}")
+
+
+def _parse_value_change_step(
+    ts: TokenStream,
+    streams: Dict[str, ValueStream],
+    current_time: int,
+    last_time: int,
+) -> Tuple[int, int]:
+    """Consume one value-change item and return the updated (current, last) time."""
+    token = ts.pop()
+    if token == "$comment":
+        ts.collect_until_end()
+        return current_time, last_time
+    if token in _DUMP_CONTROL_DIRECTIVES:
+        _parse_dump_block(token, ts, streams, current_time)
+        return current_time, last_time
+    if token == "$end":
+        raise VCDParseError("$end without a matching dump-control directive")
+    if token.startswith("$"):
+        raise VCDParseError(f"unsupported value-change directive {token}")
+    if token.startswith("#"):
+        stamp = token[1:]
+        if not stamp.isdigit():
+            raise VCDParseError(f"invalid timestamp {token!r}")
+        new_time = int(stamp)
+        if new_time < current_time:
+            raise VCDParseError("timestamps must be nondecreasing")
+        return new_time, max(last_time, new_time)
+    _apply_value_change(token, ts, streams, current_time)
+    return current_time, last_time
 
 
 def _parse_dump_block(
@@ -441,7 +483,7 @@ def _parse_dump_block(
     """
     while True:
         if ts.done():
-            raise VCDParseError(f"unterminated {directive}")
+            raise VCDTruncatedError(f"unterminated {directive}")
         token = ts.pop()
         if token == "$end":
             return
@@ -552,32 +594,27 @@ def _parse_vcd(ts: TokenStream) -> VCDFile:
 
     current_time = 0
     last_time = 0
+    warnings: List[str] = []
 
     while not ts.done():
-        token = ts.pop()
-        if token == "$comment":
-            ts.collect_until_end()
-            continue
-        if token in _DUMP_CONTROL_DIRECTIVES:
-            _parse_dump_block(token, ts, streams, current_time)
-            continue
-        if token == "$end":
-            raise VCDParseError("$end without a matching dump-control directive")
-        if token.startswith("$"):
-            raise VCDParseError(f"unsupported value-change directive {token}")
-        if token.startswith("#"):
-            stamp = token[1:]
-            if not stamp.isdigit():
-                raise VCDParseError(f"invalid timestamp {token!r}")
-            new_time = int(stamp)
-            if new_time < current_time:
-                raise VCDParseError("timestamps must be nondecreasing")
-            current_time = new_time
-            last_time = max(last_time, current_time)
-            continue
-        _apply_value_change(token, ts, streams, current_time)
+        try:
+            current_time, last_time = _parse_value_change_step(
+                ts, streams, current_time, last_time
+            )
+        except VCDTruncatedError as exc:
+            # A writer killed mid-trace leaves a complete header and value
+            # changes that simply stop. Everything already recorded is still
+            # true, so keep it and say so instead of discarding the whole file.
+            warnings.append(f"trace is truncated at line {ts.line}: {exc}")
+            break
 
-    return VCDFile(timescale=timescale, signals=signals, streams=streams, last_time=last_time)
+    return VCDFile(
+        timescale=timescale,
+        signals=signals,
+        streams=streams,
+        last_time=last_time,
+        warnings=warnings,
+    )
 
 
 def parse_vcd(path: Path) -> VCDFile:
@@ -2256,6 +2293,8 @@ def run_tui(
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     path = _require_file(args, parser)
     vcd = parse_vcd(path)
+    for warning in vcd.warnings:
+        print(f"vcdtui: warning: {warning}", file=sys.stderr)
 
     if args.list:
         _print_signals(vcd.signals)

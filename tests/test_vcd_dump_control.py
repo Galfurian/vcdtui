@@ -157,9 +157,12 @@ $comment checkpoint $end
         with self.assertRaisesRegex(vcdtui.VCDParseError, r"\$dumpall.*inside \$dumpvars"):
             self.parse("#0\n$dumpvars\n0!\n$dumpall\n$end\n$end\n")
 
-    def test_unterminated_dump_block_is_rejected(self):
-        with self.assertRaisesRegex(vcdtui.VCDParseError, r"unterminated \$dumpvars"):
-            self.parse("#0\n$dumpvars\n0!\n")
+    def test_unterminated_dump_block_is_truncation_not_corruption(self):
+        # The block never closes because the writer stopped, so keep the values
+        # it did contain and report it. See tests/test_vcd_truncation.py.
+        vcd = self.parse("#0\n$dumpvars\n0!\n")
+        self.assertEqual([c.value for c in vcd.streams["!"].changes], ["0"])
+        self.assertIn("unterminated $dumpvars", vcd.warnings[0])
 
     def test_stray_end_is_rejected(self):
         with self.assertRaisesRegex(vcdtui.VCDParseError, r"\$end"):
