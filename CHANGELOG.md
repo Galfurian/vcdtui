@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0
+
+Selecting signals in a testbench that instantiates the same module twice took
+either a leaf name that swept up every copy or an instance path for every
+signal: six signals cost 96 characters. This release is about naming a selection
+in a way that fits on a slide.
+
+### Signal selection
+
+- `--scope PATH` roots the whole view at one scope. Selectors resolve inside it
+  and `--list`, `--find`, `--dump` and the tree name signals relative to it, so
+  `--scope tb_counter -s clk,start,dec` means three specific signals. A scope
+  that matches more than one place is an error listing the candidates, because a
+  view has one root and guessing would show the wrong instance. Names are
+  stripped only when `--scope` is passed, so default `--dump` output is
+  unchanged.
+- Glob selectors, with the shell convention and `.` as the separator: `*` and
+  `?` stay inside one hierarchy level, `**` crosses levels. `-s 'tb.*'`,
+  `-s 'tb.**'`, `-s '**.clk'`, `-s 'dut?.value'`. Only `*` and `?` are special,
+  so `-s '**.value[7:0]'` selects by declared bit range. A glob is matched from
+  the root first and only retried at each scope boundary if nothing matched
+  there, which keeps `*` and `**` distinct. Matching several signals is not
+  reported as ambiguous for a glob: that is what it asked for.
+- A selector that is exactly a signal's name now wins over one that is a
+  trailing run of its scopes, so `clk` is the top-level `clk` when the design
+  has one rather than every `clk` in it.
+- `--signals` / `-s` is repeatable, so a long selection can be written one
+  selector per line instead of as one comma-separated string.
+- The resolution order is documented: whole name, then path, then glob, then
+  substring, each tier used only when the previous finds nothing.
+
+### Qualification
+
+- The Icarus Verilog job now simulates a design that instantiates one module
+  twice and checks the ambiguity warning, `--scope`, the `*` versus `**`
+  distinction and `dut?.value` against the trace Icarus actually wrote.
+- 247 tests, up from 198.
+
 ## 0.2.0
 
 The 0.1.0 parser could not open a single trace produced by Icarus Verilog 12.0,
