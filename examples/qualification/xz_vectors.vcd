@@ -1,0 +1,28 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! scalar $end
+$var wire 4 " nibble [3:0] $end
+$var wire 8 # byte [7:0] $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+x!
+bx "
+bz #
+$end
+#5
+0!
+b1 "
+b101 #
+#10
+1!
+b10xz "
+bxxxx #
+#15
+z!
+bzzzz "
+b10xz01xz #
+#20
+0!
+b1111 "
+b11111111 #
