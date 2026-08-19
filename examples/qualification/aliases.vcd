@@ -1,0 +1,26 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$scope module dut $end
+$var wire 1 ! clk_alias $end
+$var wire 4 # count [3:0] $end
+$upscope $end
+$scope module debug $end
+$var wire 4 # count_mirror [3:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+b0011 #
+$end
+#5
+1!
+#10
+0!
+b0010 #
+#15
+1!
+#20
+0!
+b0001 #
