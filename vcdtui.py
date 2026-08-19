@@ -13,7 +13,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-__version__ = "0.1.0-dev"
+__version__ = "0.1.0"
 
 
 class VCDTUIError(Exception):
@@ -1390,6 +1390,43 @@ def _draw_ruler(
         _safe_addstr(stdscr, 2, x + col, "^", attrs["cursor"])
 
 
+def _tree_item_text(item: TreeItem, state: TUIState, *, ascii_only: bool) -> str:
+    indent = "  " * item.depth
+    if item.kind == "scope":
+        is_open = item.path in state.expanded_scopes
+        arrow = ("v" if is_open else ">") if ascii_only else ("▼" if is_open else "▶")
+        return f"{indent}{arrow} {item.label}"
+    assert item.signal_index is not None
+    checked = "x" if state.selected[item.signal_index] else " "
+    return f"{indent}[{checked}] {item.label}"
+
+
+def _clip_end(text: str, width: int, *, ascii_only: bool) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    marker = "..." if ascii_only else "…"
+    if width <= len(marker):
+        return text[:width]
+    return text[: width - len(marker)] + marker
+
+
+def _clip_middle(text: str, width: int, *, ascii_only: bool) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    marker = "..." if ascii_only else "…"
+    if width <= len(marker):
+        return text[:width]
+    remaining = width - len(marker)
+    left = (remaining + 1) // 2
+    right = remaining - left
+    suffix = text[-right:] if right else ""
+    return text[:left] + marker + suffix
+
+
 def _draw_tui(
     stdscr,
     vcd: VCDFile,
@@ -1422,7 +1459,13 @@ def _draw_tui(
         stdscr.refresh()
         return
 
-    tree_width = min(34, max(22, width // 4))
+    tree_items = build_tree_items(all_signals, state.expanded_scopes)
+    longest_tree_line = max(
+        [len("signals"), *(len(_tree_item_text(item, state, ascii_only=ascii_only)) for item in tree_items)],
+        default=len("signals"),
+    )
+    tree_cap = min(48, max(20, width // 3))
+    tree_width = max(14, min(tree_cap, longest_tree_line + 1))
     meta_width = min(28, max(18, width // 5))
     divider1_x = tree_width
     meta_x = divider1_x + 2
@@ -1442,7 +1485,6 @@ def _draw_tui(
     content_row = 4
     main_capacity = max(1, main_bottom - content_row + 1)
 
-    tree_items = build_tree_items(all_signals, state.expanded_scopes)
     state.tree_focus, state.tree_offset = _ensure_offset(
         state.tree_focus,
         state.tree_offset,
@@ -1479,17 +1521,12 @@ def _draw_tui(
     tree_end = min(len(tree_items), state.tree_offset + main_capacity)
     for row, item_index in enumerate(range(state.tree_offset, tree_end), start=content_row):
         item = tree_items[item_index]
-        indent = "  " * item.depth
-        if item.kind == "scope":
-            is_open = item.path in state.expanded_scopes
-            arrow = ("v" if is_open else ">") if ascii_only else ("▼" if is_open else "▶")
-            text = f"{indent}{arrow} {item.label}"
-            attr = attrs["scope"]
-        else:
-            assert item.signal_index is not None
-            checked = "x" if state.selected[item.signal_index] else " "
-            text = f"{indent}[{checked}] {item.label}"
-            attr = 0
+        text = _clip_end(
+            _tree_item_text(item, state, ascii_only=ascii_only),
+            tree_width,
+            ascii_only=ascii_only,
+        )
+        attr = attrs["scope"] if item.kind == "scope" else 0
         if state.focus_pane == "tree" and item_index == state.tree_focus:
             attr |= attrs["focus"]
         _safe_addstr(stdscr, row, 0, text, attr)
@@ -1507,11 +1544,12 @@ def _draw_tui(
         display_format = state.display_formats[signal_index]
         value = format_signal_value(signal, raw_value, display_format)
         value_room = min(max(len(value), 1), 12)
+        shown_value = _clip_middle(value, value_room, ascii_only=ascii_only)
         name_room = max(4, meta_width - value_room - 2)
         name = signal.reference
         if len(name) > name_room:
             name = ("…" + name[-(name_room - 1):]) if not ascii_only and name_room > 1 else name[-name_room:]
-        meta = f"{name:<{name_room}} {value:>{value_room}}"
+        meta = f"{name:<{name_room}} {shown_value:>{value_room}}"
         meta_attr = 0
         if state.focus_pane == "wave" and visible_pos == state.wave_focus:
             meta_attr |= attrs["focus"]
