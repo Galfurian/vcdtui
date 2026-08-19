@@ -41,7 +41,7 @@ Enter               expand/collapse scope
 Space               show/hide signal
 a, Ctrl+A           show all signals, or hide all when all are shown
 A                   hide all signals
-v                   vector format: bin / hex / unsigned / signed
+v                   vector format menu (Up/Down, Enter, Esc)
 
 Left/Right, h/l     move cursor one VCD tick
 Home/End, 0/$       active-range start / end

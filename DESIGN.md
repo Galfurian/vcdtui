@@ -332,6 +332,15 @@ secondary UI            dim/gray where supported
 
 The TUI must not require special fonts. Ordinary Unicode box/wave characters are acceptable, with an ASCII fallback.
 
+Choices offered in a panel are made with a cursor rather than with mnemonic
+letters. A letter key has to be memorized, collides with the main keymap, and
+cannot show what is currently in effect; a cursor placed on the active entry
+shows the current state, the alternatives, and how to move between them, all at
+once. `Up`/`Down` move and wrap, `Enter` applies, `Esc` cancels.
+
+Panel content is produced by pure functions returning lines, so it stays
+qualifiable without simulating terminal keystrokes.
+
 ## Temporal inspection
 
 Temporal inspection is a core teaching capability, not post-processing polish.
