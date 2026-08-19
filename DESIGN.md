@@ -117,14 +117,23 @@ The first qualified parser contract is intentionally narrow.
 ```text
 $date          ignored safely
 $version       ignored safely
-$comment       ignored safely
+$comment       ignored safely, in the header and in the value-change section
 $timescale     parsed
 $scope         parsed
 $upscope       parsed
 $var           parsed
 $enddefinitions
 $dumpvars      parsed as a value-change block
+$dumpall       parsed as a value-change block
+$dumpoff       parsed as a value-change block
+$dumpon        parsed as a value-change block
 ```
+
+A dump-control block is not skipped: its body uses the same value-change
+grammar as the surrounding stream and is recorded at the timestamp currently in
+effect. The qualified simulation baseline (Icarus Verilog 12.0) emits
+`$comment` and `$dumpall` immediately after `$enddefinitions`, before the first
+timestamp, so both must be accepted there.
 
 ### Supported value changes
 
@@ -145,7 +154,6 @@ real value changes
 string value changes
 analog extensions
 non-standard/exotic VCD extensions
-runtime dump-control directives beyond the initial $dumpvars block
 ```
 
 Unsupported constructs should produce a clear error identifying the construct.
@@ -157,7 +165,7 @@ Unsupported constructs should produce a clear error identifying the construct.
 - `$var ... $end` is tokenized until its terminating `$end`;
 - identifier codes are opaque strings;
 - nested scopes use a real stack;
-- `$dumpvars ... $end` is handled explicitly;
+- `$dumpvars ... $end` and the other dump-control blocks are handled explicitly;
 - repeated changes at one timestamp resolve deterministically to the last value seen;
 - timestamps must be nondecreasing;
 - malformed scope nesting is rejected;
