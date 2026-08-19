@@ -431,8 +431,10 @@ produce the ambiguity warning that a bare leaf name does.
 `fnmatch` is not used: its `*` crosses separators and its `[...]` is a character
 class, which would make a declared bit range unquotable. The translation is a
 per-segment walk into one `re` pattern, matched against the name with a trailing
-separator so that `**` can carry its own and span zero scopes. Substring matching
-is not attempted for a glob, so a pattern that matches nothing fails saying so.
+separator so that `**` can carry its own and span zero scopes. A run of `**`
+segments collapses to one, because each is a repeated group and nesting them
+makes a failing match backtrack exponentially. Substring matching is not
+attempted for a glob, so a pattern that matches nothing fails saying so.
 
 ### Rooting the view at a scope
 

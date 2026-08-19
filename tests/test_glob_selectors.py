@@ -50,6 +50,18 @@ class GlobMatchTests(unittest.TestCase):
         self.assertTrue(self.matches("tb.count[3:0]", "tb.count*"))
         self.assertFalse(self.matches("tb.count3", "tb.count[3:0]"))
 
+    def test_consecutive_double_stars_collapse(self):
+        # Each "**" compiles to a repeated group, so several in a row nest
+        # quantifiers and a pattern that fails to match backtracks
+        # exponentially: 10 of them against 20 scopes took seconds. They all
+        # mean the same thing, so only one survives.
+        self.assertEqual(
+            vcdtui._glob_regex("a.**.**.**.z").pattern,
+            vcdtui._glob_regex("a.**.z").pattern,
+        )
+        self.assertTrue(self.matches("a.b.c.z", "a.**.**.z"))
+        self.assertFalse(self.matches("a.b.c.y", "a.**.**.z"))
+
     def test_matching_is_case_insensitive_like_every_other_selector(self):
         self.assertTrue(self.matches("tb.CLK", "tb.c*"))
 

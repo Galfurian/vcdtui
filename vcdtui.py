@@ -715,7 +715,14 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
     if "." not in pattern:
         pattern = f"**.{pattern}"
     parts: List[str] = []
+    previous = ""
     for segment in pattern.split("."):
+        # Each "**" compiles to a repeated group, so a run of them nests
+        # quantifiers and a pattern that fails to match backtracks
+        # exponentially. They all mean the same thing, so keep one.
+        if segment == "**" and previous == "**":
+            continue
+        previous = segment
         if segment == "**":
             parts.append(r"(?:[^.]+\.)*")
             continue
