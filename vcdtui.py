@@ -11,7 +11,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 __version__ = "0.1.0"
 
@@ -73,13 +73,13 @@ class TimeScale:
         return f"{tick} ticks"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Change:
     time: int
     value: str
 
 
-@dataclass
+@dataclass(slots=True)
 class ValueStream:
     identifier: str
     width: int
@@ -111,7 +111,7 @@ class ValueStream:
         return self.changes[first:last]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Signal:
     full_name: str
     reference: str
@@ -183,18 +183,37 @@ class TUIState:
 
 
 class TokenStream:
-    def __init__(self, tokens: Sequence[str]) -> None:
-        self.tokens = tokens
-        self.index = 0
+    """One-token lookahead over a lazy ``(token, line)`` source.
+
+    The source is never materialized, so a trace is bounded by the value changes
+    it contains rather than by the number of tokens on disk. ``line`` tracks the
+    token last popped, which is what a parse error should point at.
+    """
+
+    def __init__(self, tokens: Iterable[Tuple[str, int]]) -> None:
+        self._tokens = iter(tokens)
+        self._pending: Optional[Tuple[str, int]] = None
+        self.line = 0
+
+    def _lookahead(self) -> Optional[Tuple[str, int]]:
+        if self._pending is None:
+            self._pending = next(self._tokens, None)
+        return self._pending
+
+    def peek(self) -> Optional[str]:
+        """Return the next token without consuming it, or None at end of input."""
+        item = self._lookahead()
+        return None if item is None else item[0]
 
     def done(self) -> bool:
-        return self.index >= len(self.tokens)
+        return self._lookahead() is None
 
     def pop(self) -> str:
-        if self.done():
+        item = self._lookahead()
+        if item is None:
             raise VCDParseError("unexpected end of file")
-        token = self.tokens[self.index]
-        self.index += 1
+        self._pending = None
+        token, self.line = item
         return token
 
     def collect_until_end(self) -> List[str]:
@@ -204,6 +223,19 @@ class TokenStream:
             if token == "$end":
                 return values
             values.append(token)
+
+
+# A UTF-8 byte order mark is not part of any token; some editors add one.
+_BOM = "\ufeff"
+
+
+def iter_vcd_tokens(lines: Iterable[str]) -> Iterator[Tuple[str, int]]:
+    """Yield ``(token, line_number)`` pairs, one line of input at a time."""
+    for number, line in enumerate(lines, start=1):
+        if number == 1:
+            line = line.lstrip(_BOM)
+        for token in line.split():
+            yield token, number
 
 
 def _parse_timescale(parts: Sequence[str]) -> TimeScale:
@@ -393,7 +425,30 @@ def _parse_dump_block(
 
 
 def parse_vcd_text(text: str) -> VCDFile:
-    ts = TokenStream(text.split())
+    """Parse a whole VCD held in memory. Prefer ``parse_vcd`` for files."""
+    return _parse_tokens(TokenStream(iter_vcd_tokens(text.splitlines())))
+
+
+def _parse_tokens(ts: TokenStream) -> VCDFile:
+    try:
+        return _parse_vcd(ts)
+    except VCDParseError as exc:
+        raise VCDParseError(f"line {ts.line}: {exc}") from None
+
+
+def _reject_non_vcd_input(ts: TokenStream) -> None:
+    """Fail early and legibly when the input is not a VCD at all."""
+    token = ts.peek()
+    if token is None:
+        raise VCDParseError("file is empty")
+    if not token.startswith("$"):
+        raise VCDParseError(
+            f"does not look like a VCD file: expected a $ directive, found {token!r}"
+        )
+
+
+def _parse_vcd(ts: TokenStream) -> VCDFile:
+    _reject_non_vcd_input(ts)
     scopes: List[str] = []
     streams: Dict[str, ValueStream] = {}
     signals: List[Signal] = []
@@ -495,12 +550,18 @@ def parse_vcd_text(text: str) -> VCDFile:
 
 
 def parse_vcd(path: Path) -> VCDFile:
+    """Parse a VCD file, streaming it line by line.
+
+    Decoding is deliberately forgiving: a stray non-UTF-8 byte in a $comment or
+    a $date must not make a whole trace unreadable, and only tokens matter.
+    """
     try:
-        return parse_vcd_text(path.read_text(encoding="utf-8"))
+        with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+            return _parse_tokens(TokenStream(iter_vcd_tokens(handle)))
+    except VCDParseError as exc:
+        raise VCDParseError(f"{path}: {exc}") from None
     except OSError as exc:
         raise VCDTUIError(f"cannot read {path}: {exc.strerror or exc}") from exc
-    except UnicodeError as exc:
-        raise VCDTUIError(f"cannot decode {path} as UTF-8") from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
