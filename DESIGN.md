@@ -219,6 +219,15 @@ Unsupported constructs should produce a clear error identifying the construct.
 
 ### Parser robustness requirements
 
+- the input is tokenized lazily, one line at a time, and never materialized as
+  a token list: cost scales with the value changes a trace contains, not with
+  its size on disk;
+- every parse error names the line it was found on;
+- decoding is forgiving (`utf-8-sig`, `errors="replace"`): a byte order mark or
+  a stray non-UTF-8 byte in a `$comment` or `$date` must not make a trace
+  unreadable;
+- input that is not a VCD at all is rejected up front, by its first token,
+  rather than through a confusing downstream token error;
 - directives may span lines;
 - parsing must not depend on line-oriented `$var` declarations;
 - `$var ... $end` is tokenized until its terminating `$end`;
@@ -355,6 +364,12 @@ Aliases remain distinct selectable `Signal` objects while sharing one `ValueStre
 
 ## Errors
 
+Parse errors carry their position, and the file name when one is known:
+
+```text
+vcdtui: error: trace.vcd: line 137: unsupported value-change directive $foo
+```
+
 Expected failures include:
 
 - missing file;
@@ -467,6 +482,12 @@ If configuration is added while Python 3.10 remains the baseline, it must not in
 ## Performance direction
 
 The initial model loads a trace into sparse Python structures. That is appropriate for small and medium instructional traces.
+
+Two properties keep that affordable and must not regress:
+
+- the tokenizer is lazy, so the file is never held in memory as tokens;
+- `Change`, `ValueStream` and `Signal` use `__slots__`, because one `Change`
+  exists per value change and a per-instance `__dict__` would dominate.
 
 If large-file support later becomes necessary, indexing and `mmap` may be explored without changing the public model. This is post-course-core work.
 
