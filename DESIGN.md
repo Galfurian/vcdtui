@@ -46,6 +46,7 @@ The model separates VCD identifier codes from hierarchical names.
 identifier code ──────> ValueStream
                          identifier
                          width
+                         kind
                          changes[]
 
 hierarchical name ────> Signal
@@ -66,6 +67,7 @@ Change
 ValueStream
   identifier: str
   width: int
+  kind: str          # bit | real | string
   changes: list[Change]
 
 Signal
@@ -141,17 +143,38 @@ timestamp, so both must be accepted there.
 timestamps:        #123
 scalar values:     0 1 x z
 binary vectors:    b0101
+real values:       r1.5
+string values:     sIDLE
 ```
 
 Upper/lower case `X/Z` is normalized.
 
 Vectors are normalized to their declared width. Short binary values are zero-extended; short values beginning in `x` or `z` are extended with that state. Values wider than the declaration are rejected.
 
+Real and string values are not bit vectors, so they are stored verbatim and are
+never width-normalized, radix-converted or interpreted as `x`/`z`. A real value
+is validated as a number and kept in its original textual form, which preserves
+what the writer emitted, including `NaN` and `Inf`. The qualified simulation
+baseline declares a Verilog `real` as `$var real 1 <id> <ref> $end` and writes
+`rNaN` for it inside the `$dumpoff` checkpoint.
+
+Each `ValueStream` therefore carries a value `kind`:
+
+```text
+bit      0/1/x/z scalars and b... vectors
+real     r... values
+string   s... values
+```
+
+The kind comes from the `$var` type. A `r`/`s` value on a variable declared with
+a generic type is unambiguous, so it adopts that kind instead of failing; a value
+form that contradicts state already recorded for the stream is an error. Only
+`bit` streams participate in edge detection and waveform drawing; the other kinds
+render as labelled bus tracks.
+
 ### Explicitly unsupported initially
 
 ```text
-real value changes
-string value changes
 analog extensions
 non-standard/exotic VCD extensions
 ```

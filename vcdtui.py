@@ -83,6 +83,7 @@ class Change:
 class ValueStream:
     identifier: str
     width: int
+    kind: str = "bit"
     changes: List[Change] = field(default_factory=list)
 
     def add(self, time: int, value: str) -> None:
@@ -208,6 +209,30 @@ def _parse_timescale(parts: Sequence[str]) -> TimeScale:
     return TimeScale(int(digits), unit)
 
 
+# $var types whose value changes do not use the bit-vector grammar. Everything
+# else (wire, reg, integer, parameter, event, ...) is dumped as 0/1/x/z bits.
+_REAL_VAR_TYPES = ("real", "realtime", "shortreal")
+_STRING_VAR_TYPES = ("string",)
+
+
+def _kind_for_var_type(var_type: str) -> str:
+    lowered = var_type.lower()
+    if lowered in _REAL_VAR_TYPES:
+        return "real"
+    if lowered in _STRING_VAR_TYPES:
+        return "string"
+    return "bit"
+
+
+def _normalize_real(value: str) -> str:
+    """Validate a real value change and keep its exact textual form."""
+    try:
+        float(value)
+    except ValueError:
+        raise VCDParseError(f"invalid real value {value!r}") from None
+    return value
+
+
 def _normalize_vector(value: str, width: int) -> str:
     bits = value.lower()
     if not bits or any(ch not in "01xz" for ch in bits):
@@ -232,6 +257,28 @@ def _stream_for(streams: Dict[str, ValueStream], identifier: str) -> ValueStream
     return stream
 
 
+def _require_kind(stream: ValueStream, kind: str) -> None:
+    if stream.kind != kind:
+        raise VCDParseError(
+            f"{kind} value used for {stream.identifier!r}, "
+            f"declared as a {stream.kind} variable"
+        )
+
+
+def _adopt_kind(stream: ValueStream, kind: str) -> None:
+    """Accept a real/string value on a stream whose $var type did not say so.
+
+    Some writers declare such variables with a generic type. The value form is
+    unambiguous, so adopt it rather than refusing to open the trace; only a
+    stream that already carries a different value kind is an error.
+    """
+    if stream.kind == kind:
+        return
+    if stream.changes:
+        _require_kind(stream, kind)
+    stream.kind = kind
+
+
 def _apply_value_change(
     token: str,
     ts: TokenStream,
@@ -243,6 +290,7 @@ def _apply_value_change(
     if first in "01xz" and len(token) > 1:
         identifier = token[1:]
         stream = _stream_for(streams, identifier)
+        _require_kind(stream, "bit")
         if stream.width != 1:
             raise VCDParseError(
                 f"scalar value used for {identifier!r}, declared width {stream.width}"
@@ -252,11 +300,22 @@ def _apply_value_change(
     if first == "b" and len(token) > 1:
         raw = token[1:]
         stream = _stream_for(streams, ts.pop())
+        _require_kind(stream, "bit")
         stream.add(time, _normalize_vector(raw, stream.width))
         return
-    if first in ("r", "s"):
-        kind = "real" if first == "r" else "string"
-        raise VCDParseError(f"{kind} value changes are not supported")
+    if first == "r" and len(token) > 1:
+        raw = token[1:]
+        stream = _stream_for(streams, ts.pop())
+        _adopt_kind(stream, "real")
+        stream.add(time, _normalize_real(raw))
+        return
+    if first == "s":
+        # A string value may legitimately be empty, so "s" alone is valid.
+        raw = token[1:]
+        stream = _stream_for(streams, ts.pop())
+        _adopt_kind(stream, "string")
+        stream.add(time, raw)
+        return
     raise VCDParseError(f"unsupported value-change token {token!r}")
 
 
@@ -330,14 +389,20 @@ def parse_vcd_text(text: str) -> VCDFile:
                 raise VCDParseError(f"invalid width in $var: {width_text!r}")
             width = int(width_text)
             reference = " ".join(parts[3:])
+            kind = _kind_for_var_type(var_type)
             stream = streams.get(identifier)
             if stream is None:
-                stream = ValueStream(identifier=identifier, width=width)
+                stream = ValueStream(identifier=identifier, width=width, kind=kind)
                 streams[identifier] = stream
             elif stream.width != width:
                 raise VCDParseError(
                     f"identifier {identifier!r} is declared with incompatible widths "
                     f"{stream.width} and {width}"
+                )
+            elif stream.kind != kind:
+                raise VCDParseError(
+                    f"identifier {identifier!r} is declared with incompatible value kinds "
+                    f"{stream.kind} and {kind}"
                 )
             full_name = ".".join(scopes + [reference]) if scopes else reference
             signals.append(Signal(full_name, reference, width, var_type, stream))
@@ -491,6 +556,8 @@ def format_signal_value(signal: Signal, value: Optional[str], display_format: st
     """Format one VCD value for presentation without changing the stored trace value."""
     if value is None:
         return "?"
+    if signal.stream.kind != "bit":
+        return value
     text = value.lower()
     if signal.width <= 1 or text == "?":
         return text
@@ -524,7 +591,7 @@ def next_transition(stream: ValueStream, cursor: int, *, forward: bool) -> Optio
 
 
 def edge_times(stream: ValueStream, kind: str) -> List[int]:
-    if stream.width != 1:
+    if stream.width != 1 or stream.kind != "bit":
         return []
     if kind not in ("rising", "falling", "any"):
         raise ValueError(f"unknown edge kind {kind!r}")
@@ -721,7 +788,9 @@ def _raw_dump_rows(
 def _color_value(signal: Signal, value: str, enabled: bool) -> str:
     if not enabled or value == "?":
         return value
-    if "x" in value:
+    if signal.stream.kind != "bit":
+        color = "36"
+    elif "x" in value:
         color = "31"
     elif "z" in value:
         color = "35"
@@ -814,6 +883,8 @@ def sample_waveform(
         value = signal.stream.value_at(tick)
         if value is None:
             char = "?"
+        elif signal.stream.kind != "bit":
+            char = "="
         elif "x" in value:
             char = "x"
         elif "z" in value:
@@ -906,7 +977,7 @@ def render_waveform_track(
     ascii_only: bool,
     display_format: str = "binary",
 ) -> str:
-    if signal.width == 1:
+    if signal.width == 1 and signal.stream.kind == "bit":
         return render_scalar_track(signal, start, end, width, ascii_only=ascii_only)
     return render_bus_track(
         signal, start, end, width, ascii_only=ascii_only, display_format=display_format
