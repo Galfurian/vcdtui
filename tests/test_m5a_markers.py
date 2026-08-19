@@ -56,7 +56,7 @@ class MarkerTests(unittest.TestCase):
         )
         text = "\n".join(lines)
         self.assertIn("marker", lines[0])
-        self.assertIn("count [3:0]", lines[0])
+        self.assertIn("count[3:0]", lines[0])
         self.assertIn("0001", lines[1])
         self.assertIn("0000", lines[2])
         self.assertIn("delta", lines[3])

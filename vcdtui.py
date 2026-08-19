@@ -118,6 +118,17 @@ class Signal:
     width: int
     var_type: str
     stream: ValueStream
+    bit_range: str = ""
+
+    @property
+    def display_name(self) -> str:
+        """Hierarchical name with the declared bit range, as VCD writers show it."""
+        return f"{self.full_name}{self.bit_range}"
+
+    @property
+    def display_reference(self) -> str:
+        """Leaf name with the declared bit range, for narrow UI columns."""
+        return f"{self.reference}{self.bit_range}"
 
 
 @dataclass
@@ -213,6 +224,41 @@ def _parse_timescale(parts: Sequence[str]) -> TimeScale:
 # else (wire, reg, integer, parameter, event, ...) is dumped as 0/1/x/z bits.
 _REAL_VAR_TYPES = ("real", "realtime", "shortreal")
 _STRING_VAR_TYPES = ("string",)
+
+
+def _split_var_reference(parts: Sequence[str]) -> Tuple[str, str]:
+    """Split a $var reference into its name and its declared bit range.
+
+    IEEE 1364 allows the range to be attached to the identifier or written as
+    separate tokens; the qualified baseline separates it:
+
+        $var reg 8 " count [7:0] $end
+        $var reg 3 $ \\mem[0] [2:0] $end
+
+    Brackets that arrive in the identifier token itself are only split off when
+    they are a msb:lsb range. A bare "[0]" there indexes an array element and is
+    part of the name, so splitting it would merge distinct elements.
+    """
+    reference = parts[0]
+    if len(parts) > 1:
+        bit_range = "".join(parts[1:])
+        if not (bit_range.startswith("[") and bit_range.endswith("]")):
+            raise VCDParseError(f"invalid $var reference {' '.join(parts)!r}")
+    elif (
+        not reference.startswith("\\")
+        and reference.endswith("]")
+        and ":" in reference
+        and "[" in reference
+    ):
+        head, _, tail = reference.rpartition("[")
+        reference, bit_range = head, f"[{tail}"
+    else:
+        bit_range = ""
+    if not reference:
+        raise VCDParseError(f"invalid $var reference {' '.join(parts)!r}")
+    # A leading backslash only delimits an escaped identifier; it is not part of
+    # the name a user would type.
+    return reference.lstrip("\\"), bit_range
 
 
 def _kind_for_var_type(var_type: str) -> str:
@@ -388,7 +434,7 @@ def parse_vcd_text(text: str) -> VCDFile:
             if not width_text.isdigit() or int(width_text) <= 0:
                 raise VCDParseError(f"invalid width in $var: {width_text!r}")
             width = int(width_text)
-            reference = " ".join(parts[3:])
+            reference, bit_range = _split_var_reference(parts[3:])
             kind = _kind_for_var_type(var_type)
             stream = streams.get(identifier)
             if stream is None:
@@ -405,7 +451,7 @@ def parse_vcd_text(text: str) -> VCDFile:
                     f"{stream.kind} and {kind}"
                 )
             full_name = ".".join(scopes + [reference]) if scopes else reference
-            signals.append(Signal(full_name, reference, width, var_type, stream))
+            signals.append(Signal(full_name, reference, width, var_type, stream, bit_range))
             continue
         if token.startswith("$"):
             raise VCDParseError(f"unsupported header directive {token}")
@@ -508,7 +554,12 @@ def select_signals(vcd: VCDFile, selectors: Optional[str]) -> List[Signal]:
         exact = [
             index
             for index, signal in enumerate(vcd.signals)
-            if signal.full_name.casefold() == needle or signal.reference.casefold() == needle
+            if needle
+            in (
+                signal.full_name.casefold(),
+                signal.reference.casefold(),
+                signal.display_name.casefold(),
+            )
         ]
         matches = exact or [
             index
@@ -753,7 +804,7 @@ def build_tree_items(
                 visit(path, depth + 1)
         for index in members.get(parent, []):
             signal = signals[index]
-            items.append(TreeItem("signal", signal.reference, depth, parent, index))
+            items.append(TreeItem("signal", signal.display_reference, depth, parent, index))
 
     visit((), 0)
     return items
@@ -777,7 +828,7 @@ def _raw_dump_rows(
     start: int,
     end: int,
 ) -> Tuple[List[str], List[List[str]]]:
-    headers = ["tick", "time"] + [signal.full_name for signal in signals]
+    headers = ["tick", "time"] + [signal.display_name for signal in signals]
     rows: List[List[str]] = []
     for tick in _event_times(signals, start, end):
         values = [signal.stream.value_at(tick) or "?" for signal in signals]
@@ -1154,7 +1205,9 @@ def marker_table_lines(
             values.append(format_signal_value(signal, signal.stream.value_at(marker_a), display_format))
         if marker_b is not None:
             values.append(format_signal_value(signal, signal.stream.value_at(marker_b), display_format))
-        col_width = min(14, max(3, len(signal.reference), *(len(value) for value in values)))
+        col_width = min(
+            14, max(3, len(signal.display_reference), *(len(value) for value in values))
+        )
         extra = len(sep) + col_width
         if used + extra > max(1, width):
             break
@@ -1163,7 +1216,7 @@ def marker_table_lines(
         signal_widths.append(col_width)
         used += extra
 
-    headers = fixed_headers + [signal.reference for signal in chosen]
+    headers = fixed_headers + [signal.display_reference for signal in chosen]
     widths = fixed_widths + signal_widths
 
     def format_row(cells: Sequence[str]) -> str:
@@ -1398,7 +1451,7 @@ def _prompt_value_format(stdscr, signal: Signal, current: str) -> Optional[str]:
         ("u", "unsigned", "unsigned decimal"),
         ("s", "signed", "signed decimal (two's complement)"),
     ]
-    lines = [f"value format: {signal.reference}", ""]
+    lines = [f"value format: {signal.display_reference}", ""]
     for key, name, label in options:
         marker = "*" if current == name else " "
         lines.append(f" {marker} [{key}] {label}")
@@ -1658,7 +1711,7 @@ def _draw_tui(
         value_room = min(max(len(value), 1), 12)
         shown_value = _clip_middle(value, value_room, ascii_only=ascii_only)
         name_room = max(4, meta_width - value_room - 2)
-        name = signal.reference
+        name = signal.display_reference
         if len(name) > name_room:
             name = ("…" + name[-(name_room - 1):]) if not ascii_only and name_room > 1 else name[-name_room:]
         meta = f"{name:<{name_room}} {shown_value:>{value_room}}"
@@ -1710,7 +1763,7 @@ def _draw_tui(
             before = format_signal_value(item.signal, item.before, display_format)
             after = format_signal_value(item.signal, item.after, display_format)
             marker = "*" if item.changed else " "
-            text = f"{marker} {item.signal.reference:<22} {before:>10} -> {after:<10}"
+            text = f"{marker} {item.signal.display_reference:<22} {before:>10} -> {after:<10}"
             attr = curses.A_BOLD if item.changed else 0
             _safe_addstr(stdscr, row, 0, text, attr)
         panel_top += inspector_height

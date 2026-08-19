@@ -52,6 +52,7 @@ identifier code ──────> ValueStream
 hierarchical name ────> Signal
                          full_name
                          reference
+                         bit_range
                          width
                          var_type
                          stream ─────> ValueStream
@@ -71,8 +72,9 @@ ValueStream
   changes: list[Change]
 
 Signal
-  full_name: str
-  reference: str
+  full_name: str          # top.dut.count
+  reference: str          # count
+  bit_range: str          # [3:0], or empty
   width: int
   var_type: str
   stream: ValueStream
@@ -87,6 +89,40 @@ VCDFile
 If the same identifier code is declared more than once, the declarations share one `ValueStream`. Incompatible widths for the same identifier are an error.
 
 Identifier codes are treated as opaque non-whitespace strings. They must never be assumed to be numeric or alphanumeric.
+
+### Names and declared bit ranges
+
+A `$var` reference may carry a declared bit range, and the qualified baseline
+writes it as a separate token:
+
+```text
+$var reg 8 " count [7:0] $end
+$var reg 3 $ \mem[0] [2:0] $end
+$var reg 1 # \escaped$name $end
+```
+
+The range is not part of the name. `full_name` and `reference` hold the name
+alone, `bit_range` holds the range, and the display forms rejoin them without a
+space:
+
+```text
+full_name          top.dut.count
+display_name       top.dut.count[7:0]
+reference          count
+display_reference  count[7:0]
+```
+
+Names are what a selector matches, display forms are what the UI shows. A
+selector matches `full_name`, `reference` or `display_name`, so both what
+`--list` prints and what a table header shows can be pasted back into
+`--signals`.
+
+Brackets already present in the identifier token are only split off when they
+are a `msb:lsb` range. A bare `[0]` there indexes an array element and belongs
+to the name; splitting it would merge distinct elements into one.
+
+A leading backslash only delimits an escaped identifier and is stripped, so
+`\mem[0]` is selectable as `mem[0]`.
 
 ## Exact time model
 

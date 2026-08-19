@@ -64,7 +64,7 @@ class NavigationTests(unittest.TestCase):
     def test_selection_mask_preserves_signal_order(self):
         all_signals = self.vcd.signals
         selected = vcdtui.selected_signals(all_signals, [False, True])
-        self.assertEqual([signal.reference for signal in selected], ["bus [3:0]"])
+        self.assertEqual([signal.reference for signal in selected], ["bus"])
         mask = vcdtui._initial_selection(all_signals, [all_signals[0]])
         self.assertEqual(mask, [True, False])
 

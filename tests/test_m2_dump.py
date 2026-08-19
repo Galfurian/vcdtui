@@ -42,7 +42,7 @@ class DumpTests(unittest.TestCase):
 
     def test_signal_selection_prefers_exact_names(self):
         selected = vcdtui.select_signals(self.vcd, "top.dut.clk,count")
-        self.assertEqual([s.reference for s in selected], ["clk", "count [3:0]"])
+        self.assertEqual([s.reference for s in selected], ["clk", "count"])
 
     def test_missing_signal_is_error(self):
         with self.assertRaisesRegex(vcdtui.VCDTUIError, "was not found"):
@@ -69,8 +69,8 @@ class DumpTests(unittest.TestCase):
 timescale: 10 ps
 range: 10..20 ticks
 signals: 2
-tick | time  | top.dut.clk | top.dut.count [3:0]
------+-------+-------------+--------------------
+tick | time  | top.dut.clk | top.dut.count[3:0]
+-----+-------+-------------+-------------------
 10   | 100ps | 1           | 0011
 20   | 200ps | 0           | 0010
 """,
