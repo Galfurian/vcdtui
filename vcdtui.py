@@ -688,7 +688,46 @@ def _print_signals(signals: Iterable[Signal]) -> None:
         print(signal.full_name)
 
 
-def select_signals(vcd: VCDFile, selectors: Optional[str]) -> List[Signal]:
+def _matches_path(name: str, needle: str) -> bool:
+    """True when ``needle`` is the whole name or a trailing run of its scopes.
+
+    Anchoring at "." is what makes "dut4.clk" mean the clk inside dut4 while
+    "ut4.clk" means nothing.
+    """
+    return name == needle or name.endswith("." + needle)
+
+
+# An ambiguous selector is legitimate - every clock in the design is a
+# reasonable thing to ask for - but it is rarely what was meant, so name the
+# paths that would have narrowed it. Beyond this many, print a count instead.
+_MAX_REPORTED_MATCHES = 8
+
+
+def _describe_ambiguity(selector: str, matched: Sequence[Signal]) -> str:
+    names = [signal.full_name for signal in matched]
+    if len(names) > _MAX_REPORTED_MATCHES:
+        shown = names[:_MAX_REPORTED_MATCHES]
+        tail = f"\n  ... and {len(names) - _MAX_REPORTED_MATCHES} more; run --list for all of them"
+    else:
+        shown, tail = names, ""
+    listing = "".join(f"\n  {name}" for name in shown)
+    return (
+        f"{selector!r} matched {len(names)} signals; "
+        f"select one with its path:{listing}{tail}"
+    )
+
+
+def select_signals(
+    vcd: VCDFile,
+    selectors: Optional[str],
+    *,
+    warnings: Optional[List[str]] = None,
+) -> List[Signal]:
+    """Resolve --signals selectors, in declaration order and without duplicates.
+
+    A selector is tried as a path first, then as a substring, so a precise name
+    is never widened by an accidental substring hit elsewhere in the design.
+    """
     if selectors is None:
         if not vcd.signals:
             raise VCDTUIError("trace contains no signals")
@@ -698,26 +737,27 @@ def select_signals(vcd: VCDFile, selectors: Optional[str]) -> List[Signal]:
     if not requested or any(not part for part in requested):
         raise VCDTUIError("--signals requires non-empty comma-separated selectors")
 
-    selected_indexes = set()
+    selected_indexes: Set[int] = set()
     for selector in requested:
         needle = selector.casefold()
-        exact = [
+        matches = [
             index
             for index, signal in enumerate(vcd.signals)
-            if needle
-            in (
-                signal.full_name.casefold(),
-                signal.reference.casefold(),
-                signal.display_name.casefold(),
-            )
-        ]
-        matches = exact or [
-            index
-            for index, signal in enumerate(vcd.signals)
-            if needle in signal.full_name.casefold()
+            if _matches_path(signal.full_name.casefold(), needle)
+            or _matches_path(signal.display_name.casefold(), needle)
         ]
         if not matches:
+            matches = [
+                index
+                for index, signal in enumerate(vcd.signals)
+                if needle in signal.full_name.casefold()
+            ]
+        if not matches:
             raise VCDTUIError(f"requested signal {selector!r} was not found")
+        if warnings is not None and len(matches) > 1:
+            warnings.append(
+                _describe_ambiguity(selector, [vcd.signals[index] for index in matches])
+            )
         selected_indexes.update(matches)
 
     return [signal for index, signal in enumerate(vcd.signals) if index in selected_indexes]
@@ -2366,7 +2406,10 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         _print_signals(vcd.find(args.find))
         return 0
 
-    signals = select_signals(vcd, args.signals)
+    selection_warnings: List[str] = []
+    signals = select_signals(vcd, args.signals, warnings=selection_warnings)
+    for warning in selection_warnings:
+        print(f"vcdtui: warning: {warning}", file=sys.stderr)
     start, end = resolve_range(vcd, args.time_from, args.time_to)
 
     if args.dump:

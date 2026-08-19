@@ -391,6 +391,24 @@ The first implementation may use deterministic case-insensitive substring search
 
 Hierarchical signal names should remain visible so similarly named signals in different scopes are distinguishable.
 
+A selector resolves in two tiers, the weaker one used only when the stronger
+finds nothing:
+
+```text
+path       the whole name, or a trailing run of its scopes, anchored at a "."
+substring  anywhere in the name
+```
+
+Anchoring is what makes `dut4.clk` mean the `clk` inside `dut4`, while `ut4.clk`
+does not name a path at all. Trying the path tier first means a precise selector
+is never widened by an accidental substring hit elsewhere in the design.
+
+A selector matching several signals is not an error: a testbench instantiating
+one module twice has identically named leaves in every scope, and asking for all
+of them is legitimate. It is rarely what was meant, though, so the matched paths
+are reported on stderr. Naming them there teaches the paths at the moment the
+ambiguity appears, which no separate listing command can do.
+
 Aliases remain distinct selectable `Signal` objects while sharing one `ValueStream` internally.
 
 ## Process behavior

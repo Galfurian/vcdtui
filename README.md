@@ -60,6 +60,32 @@ i                   before/after inspector
 q                   quit
 ```
 
+## Selecting signals
+
+`--signals` takes comma-separated selectors. Each is resolved as a path first,
+then, only if that fails, as a substring:
+
+```text
+tb.dut4.clk     the full hierarchical path
+dut4.clk        a trailing run of scopes, anchored at a "."
+clk             a leaf name: matches it in every scope that has one
+```
+
+A selector that matches more than one signal is accepted — every clock in a
+design is a reasonable thing to ask for — but it says so, and names the paths
+that would have narrowed it:
+
+```text
+$ vcdtui counter.vcd --signals clk --dump
+vcdtui: warning: 'clk' matched 3 signals; select one with its path:
+  tb_counter.clk
+  tb_counter.dut4.clk
+  tb_counter.dut8.clk
+```
+
+`--list` prints every full path, one per line, and `--find PATTERN` prints the
+matching ones. Both are pasteable straight back into `--signals`.
+
 `Ctrl+Left` / `Ctrl+Right` are aliases for clean binary-edge navigation when the terminal exposes those modified keys; `e/E` is the portable form.
 
 Vector display format is per signal. The underlying VCD value remains unchanged, and values containing `x` or `z` remain explicit bit patterns instead of being coerced to a number.
