@@ -66,7 +66,9 @@ Vector display format is per signal. The underlying VCD value remains unchanged,
 
 ## Selecting signals
 
-`--signals` takes comma-separated selectors, resolved in tiers, narrowest first:
+`--signals` (`-s`) takes comma-separated selectors and may be repeated, so a long
+selection can be split across lines. Each selector is resolved in tiers, narrowest
+first:
 
 ```text
 tb.dut4.clk     the whole name, with or without its [msb:lsb] range
@@ -123,7 +125,14 @@ vcdtui counter.vcd --scope tb_counter -s clk,start,dec,in4,value4,stop4
 ```
 
 Each name now means one signal, so nothing is ambiguous and nothing has to be
-spelled out twice. `--scope` must name exactly one scope; if a name like
+spelled out twice. In a Makefile the same selection reads better one per line:
+
+```make
+VCDTUI_ARGS = --scope tb_counter \
+              -s clk -s start -s dec \
+              -s in4 -s value4 -s stop4
+```
+ `--scope` must name exactly one scope; if a name like
 `regfile` exists in two instances, vcdtui says so and lists both. Without
 `--scope`, names are printed in full exactly as before.
 
