@@ -164,6 +164,8 @@ class TUIState:
     wave_offset: int = 0
     expanded_scopes: Set[Tuple[str, ...]] = field(default_factory=set)
     show_inspector: bool = False
+    marker_a: Optional[int] = None
+    marker_b: Optional[int] = None
     status: str = ""
 
 
@@ -906,6 +908,8 @@ def _init_curses_colors(curses, enabled: bool) -> Dict[str, int]:
         "dim": curses.A_DIM,
         "focus": curses.A_REVERSE,
         "scope": curses.A_BOLD,
+        "marker_a": curses.A_UNDERLINE | curses.A_BOLD,
+        "marker_b": curses.A_BOLD,
     }
     if not enabled or not curses.has_colors():
         return attrs
@@ -916,12 +920,16 @@ def _init_curses_colors(curses, enabled: bool) -> Dict[str, int]:
         curses.init_pair(2, curses.COLOR_CYAN, -1)
         curses.init_pair(3, curses.COLOR_RED, -1)
         curses.init_pair(4, curses.COLOR_YELLOW, -1)
+        curses.init_pair(5, curses.COLOR_CYAN, -1)
+        curses.init_pair(6, curses.COLOR_MAGENTA, -1)
         attrs.update(
             scalar=curses.color_pair(1),
             vector=curses.color_pair(2),
             bad=curses.color_pair(3),
             cursor=curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD,
             scope=curses.color_pair(2) | curses.A_BOLD,
+            marker_a=curses.color_pair(5) | curses.A_UNDERLINE | curses.A_BOLD,
+            marker_b=curses.color_pair(6) | curses.A_BOLD,
         )
     except curses.error:
         pass
@@ -946,6 +954,84 @@ def _visible_signal_indexes(state: TUIState) -> List[int]:
     return [index for index, enabled in enumerate(state.selected) if enabled]
 
 
+def marker_values(signals: Sequence[Signal], tick: int) -> List[str]:
+    """Return post-change values at a marker tick for the supplied signals."""
+    return [signal.stream.value_at(tick) or "?" for signal in signals]
+
+
+def marker_delta_ticks(marker_a: Optional[int], marker_b: Optional[int]) -> Optional[int]:
+    """Return signed B-A in raw VCD ticks when both markers exist."""
+    if marker_a is None or marker_b is None:
+        return None
+    return marker_b - marker_a
+
+
+def marker_table_lines(
+    vcd: VCDFile,
+    signals: Sequence[Signal],
+    marker_a: Optional[int],
+    marker_b: Optional[int],
+    width: int,
+    *,
+    ascii_only: bool,
+) -> List[str]:
+    """Build a compact marker table using the currently displayed signals."""
+    if marker_a is None and marker_b is None:
+        return []
+
+    sep = " | " if ascii_only else " │ "
+    fixed_headers = ["marker", "tick", "time"]
+    fixed_widths = [6, 8, 10]
+    used = sum(fixed_widths) + len(sep) * (len(fixed_widths) - 1)
+
+    chosen: List[Signal] = []
+    signal_widths: List[int] = []
+    for signal in signals:
+        values = []
+        if marker_a is not None:
+            values.append(signal.stream.value_at(marker_a) or "?")
+        if marker_b is not None:
+            values.append(signal.stream.value_at(marker_b) or "?")
+        col_width = min(14, max(3, len(signal.reference), *(len(value) for value in values)))
+        extra = len(sep) + col_width
+        if used + extra > max(1, width):
+            break
+        chosen.append(signal)
+        signal_widths.append(col_width)
+        used += extra
+
+    headers = fixed_headers + [signal.reference for signal in chosen]
+    widths = fixed_widths + signal_widths
+
+    def format_row(cells: Sequence[str]) -> str:
+        parts: List[str] = []
+        for index, cell in enumerate(cells):
+            text = cell
+            if len(text) > widths[index]:
+                text = text[: max(1, widths[index] - 1)] + ("~" if ascii_only else "…")
+            parts.append(text.ljust(widths[index]))
+        return sep.join(parts).rstrip()
+
+    def marker_row(label: str, tick: Optional[int]) -> List[str]:
+        if tick is None:
+            return [label, "-", "-"] + ["-" for _ in chosen]
+        return [
+            label,
+            str(tick),
+            vcd.timescale.format_tick(tick),
+            *marker_values(chosen, tick),
+        ]
+
+    lines = [format_row(headers), format_row(marker_row("A", marker_a)), format_row(marker_row("B", marker_b))]
+    delta = marker_delta_ticks(marker_a, marker_b)
+    if delta is None:
+        delta_row = ["delta", "-", "-"] + ["" for _ in chosen]
+    else:
+        delta_row = ["delta", str(delta), vcd.timescale.format_tick(delta)] + ["" for _ in chosen]
+    lines.append(format_row(delta_row))
+    return lines
+
+
 def _show_help(stdscr) -> None:
     import curses
 
@@ -966,6 +1052,8 @@ def _show_help(stdscr) -> None:
         "0 / $          cursor to active range start / end",
         "g              goto exact tick or physical time",
         "i              show/hide before/after inspector",
+        "m / M          place or move marker A / B at cursor",
+        "c              clear both markers",
         "?              this help",
         "q              quit",
         "",
@@ -990,6 +1078,20 @@ def _draw_ruler(stdscr, vcd: VCDFile, state: TUIState, x: int, width: int, attrs
     right = vcd.timescale.format_tick(state.view_end)
     _safe_addstr(stdscr, 2, x, left, attrs["dim"])
     _safe_addstr(stdscr, 2, x + max(0, width - len(right)), right, attrs["dim"])
+
+    marker_columns: Dict[int, str] = {}
+    for label, tick in (("A", state.marker_a), ("B", state.marker_b)):
+        if tick is None or not state.view_start <= tick <= state.view_end:
+            continue
+        col = _cursor_column(tick, state.view_start, state.view_end, width)
+        if col in marker_columns:
+            marker_columns[col] = "M"
+        else:
+            marker_columns[col] = label
+    for col, label in marker_columns.items():
+        attr = attrs["marker_a"] if label == "A" else attrs["marker_b"]
+        _safe_addstr(stdscr, 2, x + col, label, attr)
+
     if state.view_start <= state.cursor <= state.view_end:
         col = _cursor_column(state.cursor, state.view_start, state.view_end, width)
         _safe_addstr(stdscr, 2, x + col, "^", attrs["cursor"])
@@ -1019,7 +1121,7 @@ def _draw_tui(
         stdscr,
         1,
         0,
-        "Tab pane  Space toggle  arrows cursor/tree  +/- zoom  </> pan  n/r/f edges  i inspect  ? help",
+        "Tab pane  Space toggle  arrows cursor/tree  +/- zoom  </> pan  n/r/f edges  m/M markers  ? help",
         attrs["dim"],
     )
 
@@ -1038,10 +1140,14 @@ def _draw_tui(
     wave_x = divider2_x + 2
     wave_width = max(8, width - wave_x - 1)
 
+    marker_height = 5 if state.marker_a is not None or state.marker_b is not None else 0
+    panel_budget = max(0, height - 10)
+    marker_height = min(marker_height, panel_budget)
+    remaining_panel_budget = max(0, panel_budget - marker_height)
     inspector_height = 0
-    if state.show_inspector:
-        inspector_height = min(8, max(5, height // 3))
-    main_bottom = height - 2 - inspector_height
+    if state.show_inspector and remaining_panel_budget >= 4:
+        inspector_height = min(8, max(4, height // 3), remaining_panel_budget)
+    main_bottom = height - 2 - marker_height - inspector_height
     main_capacity = max(1, main_bottom - 4)
 
     tree_items = build_tree_items(all_signals, state.expanded_scopes)
@@ -1120,6 +1226,11 @@ def _draw_tui(
         if "x" in value or "z" in value:
             track_attr = attrs["bad"]
         _safe_addstr(stdscr, row, wave_x, track, track_attr)
+        for tick, marker_attr in ((state.marker_a, attrs["marker_a"]), (state.marker_b, attrs["marker_b"])):
+            if tick is not None and state.view_start <= tick <= state.view_end and track:
+                marker_col = _cursor_column(tick, state.view_start, state.view_end, wave_width)
+                glyph = cursor_track_glyph(track, marker_col)
+                _safe_addstr(stdscr, row, wave_x + marker_col, glyph, marker_attr)
         if cursor_in_view and track:
             cursor_col = _cursor_column(
                 state.cursor,
@@ -1130,8 +1241,9 @@ def _draw_tui(
             glyph = cursor_track_glyph(track, cursor_col)
             _safe_addstr(stdscr, row, wave_x + cursor_col, glyph, attrs["cursor"])
 
-    if state.show_inspector:
-        inspector_top = main_bottom + 1
+    panel_top = main_bottom + 1
+    if state.show_inspector and inspector_height > 0:
+        inspector_top = panel_top
         rule = "-" if ascii_only else "─"
         _safe_addstr(stdscr, inspector_top, 0, rule * max(1, width - 1), attrs["dim"])
         _safe_addstr(stdscr, inspector_top + 1, 0, "inspection: before -> after", curses.A_BOLD)
@@ -1146,12 +1258,37 @@ def _draw_tui(
             text = f"{marker} {item.signal.reference:<22} {before:>10} -> {after:<10}"
             attr = curses.A_BOLD if item.changed else 0
             _safe_addstr(stdscr, row, 0, text, attr)
+        panel_top += inspector_height
+
+    if marker_height > 0:
+        rule = "-" if ascii_only else "─"
+        _safe_addstr(stdscr, panel_top, 0, rule * max(1, width - 1), attrs["dim"])
+        table_signals = [all_signals[index] for index in visible_indexes]
+        lines = marker_table_lines(
+            vcd,
+            table_signals,
+            state.marker_a,
+            state.marker_b,
+            width - 1,
+            ascii_only=ascii_only,
+        )
+        for offset, line in enumerate(lines[: max(0, marker_height - 1)], start=1):
+            _safe_addstr(stdscr, panel_top + offset, 0, line)
 
     selected_count = len(visible_indexes)
     pane = state.focus_pane
+    marker_status = []
+    if state.marker_a is not None:
+        marker_status.append(f"A={state.marker_a}")
+    if state.marker_b is not None:
+        marker_status.append(f"B={state.marker_b}")
+    delta = marker_delta_ticks(state.marker_a, state.marker_b)
+    if delta is not None:
+        marker_status.append(f"delta={delta}")
+    marker_text = (" | " + " ".join(marker_status)) if marker_status else ""
     status = state.status or (
         f"pane={pane} | selected {selected_count}/{len(all_signals)} | "
-        f"range {range_start}..{range_end} | q quit"
+        f"range {range_start}..{range_end}{marker_text} | q quit"
     )
     _safe_addstr(stdscr, height - 1, 0, status)
     stdscr.refresh()
@@ -1295,6 +1432,19 @@ def run_tui(
             if key == ord("i"):
                 state.show_inspector = not state.show_inspector
                 continue
+            if key == ord("m"):
+                state.marker_a = state.cursor
+                state.status = f"marker A = {state.cursor} ({vcd.timescale.format_tick(state.cursor)})"
+                continue
+            if key == ord("M"):
+                state.marker_b = state.cursor
+                state.status = f"marker B = {state.cursor} ({vcd.timescale.format_tick(state.cursor)})"
+                continue
+            if key == ord("c"):
+                state.marker_a = None
+                state.marker_b = None
+                state.status = "markers cleared"
+                continue
 
             if key in (curses.KEY_LEFT, ord("h")):
                 _move_to_time(state, state.cursor - 1, start, end)
@@ -1339,7 +1489,6 @@ def run_tui(
             elif key == ord(">"):
                 state.view_start, state.view_end = pan_window(
                     state.view_start,
-                    state.view_end,
                     start,
                     end,
                     forward=True,
