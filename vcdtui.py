@@ -457,15 +457,17 @@ def next_transition(stream: ValueStream, cursor: int, *, forward: bool) -> Optio
 def edge_times(stream: ValueStream, kind: str) -> List[int]:
     if stream.width != 1:
         return []
-    if kind not in ("rising", "falling"):
+    if kind not in ("rising", "falling", "any"):
         raise ValueError(f"unknown edge kind {kind!r}")
     result: List[int] = []
     previous: Optional[str] = None
     for change in stream.changes:
         current = change.value
-        if kind == "rising" and previous == "0" and current == "1":
+        rising = previous == "0" and current == "1"
+        falling = previous == "1" and current == "0"
+        if (kind == "rising" and rising) or (kind == "falling" and falling):
             result.append(change.time)
-        elif kind == "falling" and previous == "1" and current == "0":
+        elif kind == "any" and (rising or falling):
             result.append(change.time)
         previous = current
     return result
@@ -1032,6 +1034,135 @@ def marker_table_lines(
     return lines
 
 
+def nice_timeline_step(start: int, end: int, width: int, *, min_columns: int = 12) -> int:
+    """Choose a deterministic 1/2/5 x 10^n major-tick spacing in raw VCD ticks."""
+    if end <= start or width <= 1:
+        return 1
+    span = end - start
+    denominator = max(1, width - 1)
+    desired = max(1, (span * max(1, min_columns) + denominator - 1) // denominator)
+    magnitude = 1
+    while desired > 10 * magnitude:
+        magnitude *= 10
+    for factor in (1, 2, 5, 10):
+        step = factor * magnitude
+        if step >= desired:
+            return step
+    return 10 * magnitude
+
+
+def _timeline_minor_step(major_step: int) -> Optional[int]:
+    if major_step <= 1:
+        return None
+    if major_step % 5 == 0:
+        return major_step // 5
+    if major_step % 2 == 0:
+        return major_step // 2
+    return 1
+
+
+def _ticks_on_grid(start: int, end: int, step: int) -> List[int]:
+    if step <= 0 or end < start:
+        return []
+    first = ((start + step - 1) // step) * step
+    return list(range(first, end + 1, step))
+
+
+def render_timeline_ruler(
+    timescale: TimeScale,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+) -> Tuple[str, str]:
+    """Return label and rule rows for an exact, terminal-width-independent time ruler."""
+    if width <= 0:
+        return "", ""
+    if width == 1:
+        return timescale.format_tick(start)[:1], "|" if ascii_only else "┼"
+
+    horizontal = "-" if ascii_only else "─"
+    major_glyph = "|" if ascii_only else "┼"
+    minor_glyph = "." if ascii_only else "┊"
+    labels = [" "] * width
+    rule = [horizontal] * width
+
+    major_step = nice_timeline_step(start, end, width)
+    minor_step = _timeline_minor_step(major_step)
+    if minor_step is not None:
+        for tick in _ticks_on_grid(start, end, minor_step):
+            col = _cursor_column(tick, start, end, width)
+            rule[col] = minor_glyph
+    major_ticks = _ticks_on_grid(start, end, major_step)
+    for tick in major_ticks:
+        col = _cursor_column(tick, start, end, width)
+        rule[col] = major_glyph
+    rule[0] = major_glyph
+    rule[-1] = major_glyph
+
+    occupied = [False] * width
+
+    def place(text: str, left: int) -> None:
+        if not text:
+            return
+        left = min(max(0, left), max(0, width - len(text)))
+        right = min(width, left + len(text))
+        if any(occupied[left:right]):
+            return
+        for offset, char in enumerate(text[: width - left]):
+            labels[left + offset] = char
+            occupied[left + offset] = True
+
+    start_label = timescale.format_tick(start)
+    end_label = timescale.format_tick(end)
+    place(start_label, 0)
+    place(end_label, max(0, width - len(end_label)))
+
+    for tick in major_ticks:
+        if tick in (start, end):
+            continue
+        text = timescale.format_tick(tick)
+        col = _cursor_column(tick, start, end, width)
+        left = col - len(text) // 2
+        place(text, left)
+
+    return "".join(labels), "".join(rule)
+
+
+def _ctrl_horizontal_direction(curses_module, key: int) -> Optional[bool]:
+    """Return False/True for Ctrl+Left/Ctrl+Right when terminfo exposes them."""
+    try:
+        name = curses_module.keyname(key)
+    except Exception:
+        return None
+    if isinstance(name, bytes):
+        try:
+            name = name.decode("ascii")
+        except UnicodeError:
+            return None
+    if name in ("kLFT5", "KEY_CLEFT", "CTRL_LEFT"):
+        return False
+    if name in ("kRIT5", "KEY_CRIGHT", "CTRL_RIGHT"):
+        return True
+    return None
+
+
+def _range_boundary_for_key(
+    curses_module,
+    key: int,
+    start: int,
+    end: int,
+) -> Optional[int]:
+    home = getattr(curses_module, "KEY_HOME", None)
+    finish = getattr(curses_module, "KEY_END", None)
+    if key == ord("0") or (home is not None and key == home):
+        return start
+    if key == ord("$") or (finish is not None and key == finish):
+        return end
+    return None
+
+
 def _show_help(stdscr) -> None:
     import curses
 
@@ -1044,12 +1175,15 @@ def _show_help(stdscr) -> None:
         "Space          show/hide focused signal",
         "a / A          show all / hide all signals",
         "Left/Right h/l move cursor by one VCD tick",
+        "Ctrl+Left/Right previous / next binary edge when supported",
         "< / >          pan waveform viewport",
         "+ / -          zoom in / out around cursor",
         "n / N          next / previous transition",
+        "e / E          next / previous binary edge",
         "r / R          next / previous rising edge",
         "f / F          next / previous falling edge",
-        "0 / $          cursor to active range start / end",
+        "Home / End     cursor to active range start / end",
+        "0 / $          aliases for Home / End",
         "g              goto exact tick or physical time",
         "i              show/hide before/after inspector",
         "m / M          place or move marker A / B at cursor",
@@ -1071,13 +1205,27 @@ def _show_help(stdscr) -> None:
     stdscr.getch()
 
 
-def _draw_ruler(stdscr, vcd: VCDFile, state: TUIState, x: int, width: int, attrs: Dict[str, int]) -> None:
-    if width <= 4:
+def _draw_ruler(
+    stdscr,
+    vcd: VCDFile,
+    state: TUIState,
+    x: int,
+    width: int,
+    attrs: Dict[str, int],
+    *,
+    ascii_only: bool,
+) -> None:
+    if width <= 0:
         return
-    left = vcd.timescale.format_tick(state.view_start)
-    right = vcd.timescale.format_tick(state.view_end)
-    _safe_addstr(stdscr, 2, x, left, attrs["dim"])
-    _safe_addstr(stdscr, 2, x + max(0, width - len(right)), right, attrs["dim"])
+    labels, rule = render_timeline_ruler(
+        vcd.timescale,
+        state.view_start,
+        state.view_end,
+        width,
+        ascii_only=ascii_only,
+    )
+    _safe_addstr(stdscr, 2, x, labels, attrs["dim"])
+    _safe_addstr(stdscr, 3, x, rule, attrs["dim"])
 
     marker_columns: Dict[int, str] = {}
     for label, tick in (("A", state.marker_a), ("B", state.marker_b)):
@@ -1090,11 +1238,11 @@ def _draw_ruler(stdscr, vcd: VCDFile, state: TUIState, x: int, width: int, attrs
             marker_columns[col] = label
     for col, label in marker_columns.items():
         attr = attrs["marker_a"] if label == "A" else attrs["marker_b"]
-        _safe_addstr(stdscr, 2, x + col, label, attr)
+        _safe_addstr(stdscr, 3, x + col, label, attr)
 
     if state.view_start <= state.cursor <= state.view_end:
         col = _cursor_column(state.cursor, state.view_start, state.view_end, width)
-        _safe_addstr(stdscr, 2, x + col, "^", attrs["cursor"])
+        _safe_addstr(stdscr, 3, x + col, "^", attrs["cursor"])
 
 
 def _draw_tui(
@@ -1121,7 +1269,7 @@ def _draw_tui(
         stdscr,
         1,
         0,
-        "Tab pane  Space toggle  arrows cursor/tree  +/- zoom  </> pan  n/r/f edges  m/M markers  ? help",
+        "Tab pane  Space toggle  arrows cursor/tree  +/- zoom  </> pan  n/e/r/f edges  m/M markers  ? help",
         attrs["dim"],
     )
 
@@ -1148,7 +1296,9 @@ def _draw_tui(
     if state.show_inspector and remaining_panel_budget >= 4:
         inspector_height = min(8, max(4, height // 3), remaining_panel_budget)
     main_bottom = height - 2 - marker_height - inspector_height
-    main_capacity = max(1, main_bottom - 4)
+    header_row = 4
+    content_row = 5
+    main_capacity = max(1, main_bottom - content_row + 1)
 
     tree_items = build_tree_items(all_signals, state.expanded_scopes)
     state.tree_focus, state.tree_offset = _ensure_offset(
@@ -1166,18 +1316,26 @@ def _draw_tui(
         len(visible_indexes),
     )
 
-    _safe_addstr(stdscr, 3, 0, "signals", curses.A_BOLD)
-    _safe_addstr(stdscr, 3, meta_x, "shown @cursor", curses.A_BOLD)
-    _safe_addstr(stdscr, 3, wave_x, "waveform", curses.A_BOLD)
-    _draw_ruler(stdscr, vcd, state, wave_x, wave_width, attrs)
+    _draw_ruler(
+        stdscr,
+        vcd,
+        state,
+        wave_x,
+        wave_width,
+        attrs,
+        ascii_only=ascii_only,
+    )
+    _safe_addstr(stdscr, header_row, 0, "signals", curses.A_BOLD)
+    _safe_addstr(stdscr, header_row, meta_x, "shown @cursor", curses.A_BOLD)
+    _safe_addstr(stdscr, header_row, wave_x, "waveform", curses.A_BOLD)
 
     divider = "|" if ascii_only else "│"
-    for row in range(3, main_bottom + 1):
+    for row in range(header_row, main_bottom + 1):
         _safe_addstr(stdscr, row, divider1_x, divider, attrs["dim"])
         _safe_addstr(stdscr, row, divider2_x, divider, attrs["dim"])
 
     tree_end = min(len(tree_items), state.tree_offset + main_capacity)
-    for row, item_index in enumerate(range(state.tree_offset, tree_end), start=4):
+    for row, item_index in enumerate(range(state.tree_offset, tree_end), start=content_row):
         item = tree_items[item_index]
         indent = "  " * item.depth
         if item.kind == "scope":
@@ -1199,8 +1357,8 @@ def _draw_tui(
     cursor_in_view = state.view_start <= state.cursor <= state.view_end
 
     if not shown_indexes:
-        _safe_addstr(stdscr, 4, meta_x, "no signals selected", attrs["dim"])
-    for row, visible_pos in enumerate(range(state.wave_offset, wave_end), start=4):
+        _safe_addstr(stdscr, content_row, meta_x, "no signals selected", attrs["dim"])
+    for row, visible_pos in enumerate(range(state.wave_offset, wave_end), start=content_row):
         signal_index = visible_indexes[visible_pos]
         signal = all_signals[signal_index]
         value = signal.stream.value_at(state.cursor) or "?"
@@ -1446,14 +1604,34 @@ def run_tui(
                 state.status = "markers cleared"
                 continue
 
-            if key in (curses.KEY_LEFT, ord("h")):
+            ctrl_forward = _ctrl_horizontal_direction(curses, key)
+            if ctrl_forward is not None:
+                signal_index = _navigation_signal_index(all_signals, state)
+                if signal_index is None:
+                    state.status = "select/focus a signal before temporal navigation"
+                    continue
+                signal = all_signals[signal_index]
+                tick = next_edge(signal.stream, state.cursor, "any", forward=ctrl_forward)
+                if tick is None:
+                    state.status = (
+                        f"no {'next' if ctrl_forward else 'previous'} binary edge "
+                        f"for {signal.full_name}"
+                    )
+                else:
+                    _move_to_time(state, tick, start, end)
+                    state.status = (
+                        f"binary edge: {signal.full_name} @ {tick} "
+                        f"({vcd.timescale.format_tick(tick)})"
+                    )
+                continue
+
+            boundary = _range_boundary_for_key(curses, key, start, end)
+            if boundary is not None:
+                _move_to_time(state, boundary, start, end)
+            elif key in (curses.KEY_LEFT, ord("h")):
                 _move_to_time(state, state.cursor - 1, start, end)
             elif key in (curses.KEY_RIGHT, ord("l")):
                 _move_to_time(state, state.cursor + 1, start, end)
-            elif key == ord("0"):
-                _move_to_time(state, start, start, end)
-            elif key == ord("$"):
-                _move_to_time(state, end, start, end)
             elif key in (ord("g"), ord("G")):
                 tick, state.status = _prompt_goto(
                     stdscr, vcd, start, end, stdscr.getmaxyx()[0] - 1
@@ -1489,11 +1667,15 @@ def run_tui(
             elif key == ord(">"):
                 state.view_start, state.view_end = pan_window(
                     state.view_start,
+                    state.view_end,
                     start,
                     end,
                     forward=True,
                 )
-            elif key in (ord("n"), ord("N"), ord("r"), ord("R"), ord("f"), ord("F")):
+            elif key in (
+                ord("n"), ord("N"), ord("e"), ord("E"),
+                ord("r"), ord("R"), ord("f"), ord("F"),
+            ):
                 signal_index = _navigation_signal_index(all_signals, state)
                 if signal_index is None:
                     state.status = "select/focus a signal before temporal navigation"
@@ -1503,6 +1685,9 @@ def run_tui(
                 if key in (ord("n"), ord("N")):
                     tick = next_transition(signal.stream, state.cursor, forward=forward)
                     label = "transition"
+                elif key in (ord("e"), ord("E")):
+                    tick = next_edge(signal.stream, state.cursor, "any", forward=forward)
+                    label = "binary edge"
                 elif key in (ord("r"), ord("R")):
                     tick = next_edge(signal.stream, state.cursor, "rising", forward=forward)
                     label = "rising edge"
