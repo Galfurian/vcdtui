@@ -1,7 +1,7 @@
 $timescale 1 ns $end
 $scope module top $end
-$var real 1 ! temperature $end
+$var port 1 <0 clk $end
 $upscope $end
 $enddefinitions $end
 #0
-r1.25 !
+p0 0 0 <0

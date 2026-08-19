@@ -1,0 +1,122 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: unittest (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run the test suite
+        run: python3 -m unittest discover -s tests -v
+
+  no-dependencies:
+    name: standard library only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Refuse any import outside the standard library
+        run: |
+          python3 - <<'PY'
+          import ast, pathlib, sys
+          # Every runtime import must resolve without site-packages.
+          names = set()
+          tree = ast.parse(pathlib.Path("vcdtui.py").read_text())
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  names.update(alias.name.split(".")[0] for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                  names.add(node.module.split(".")[0])
+          extra = sorted(names - set(sys.stdlib_module_names))
+          print("imports:", " ".join(sorted(names)))
+          if extra:
+              sys.exit(f"non-standard-library imports: {extra}")
+          PY
+      - name: Run as a single command with an empty environment
+        run: |
+          cd "$(mktemp -d)"
+          cp "$GITHUB_WORKSPACE/vcdtui.py" .
+          env -i "$(command -v python3)" vcdtui.py --version
+
+  icarus-smoke:
+    name: icarus verilog end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+          iverilog -V | head -1
+      - name: Simulate a design and open its trace
+        run: |
+          set -euxo pipefail
+          cat > smoke.v <<'VERILOG'
+          module top;
+            reg clk = 0;
+            reg [7:0] count = 0;
+            real level;
+            integer i;
+            always #5 clk = ~clk;
+            always @(posedge clk) count <= count + 1;
+            initial begin
+              $dumpfile("smoke.vcd");
+              $dumpvars(0, top);
+              level = 1.5; i = -3;
+              #20 $dumpoff;
+              #10 $dumpon;
+              #10 $dumpall;
+              #20000 $finish;
+            end
+          endmodule
+          VERILOG
+          iverilog -o smoke.vvp smoke.v
+          vvp smoke.vvp
+          # The trace really does contain the constructs this guards.
+          grep -q '^\$comment' smoke.vcd
+          grep -q '^\$dumpall' smoke.vcd
+          grep -q '^\$dumpoff' smoke.vcd
+          grep -q '^r' smoke.vcd
+          python3 vcdtui.py smoke.vcd --version
+          python3 vcdtui.py smoke.vcd --list
+          python3 vcdtui.py smoke.vcd --find count
+          python3 vcdtui.py smoke.vcd --signals clk,count,level --dump --ascii --no-color
+      - name: A truncated trace is still readable
+        run: |
+          set -euxo pipefail
+          head -c 400 smoke.vcd > cut.vcd
+          python3 vcdtui.py cut.vcd --list
+      - name: A closed pipe is not an error
+        run: |
+          set -u
+          # The dump is thousands of lines, so head really does close the pipe.
+          test "$(python3 vcdtui.py smoke.vcd --dump --ascii --no-color | wc -l)" -gt 1000
+          # The runner's shell is "bash -e", and the deliberate SIGPIPE is
+          # exactly the failure being measured, so read the status by hand.
+          set +e
+          python3 vcdtui.py smoke.vcd --dump --ascii --no-color 2> stderr.txt | head -3 > /dev/null
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "vcdtui exit status: $status"
+          test ! -s stderr.txt
+          test "$status" -eq 141
