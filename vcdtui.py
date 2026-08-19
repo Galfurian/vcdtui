@@ -220,6 +220,73 @@ def _normalize_vector(value: str, width: int) -> str:
     return bits
 
 
+# Runtime dump-control directives. Each opens a block of value changes that is
+# terminated by $end and carries the timestamp currently in effect.
+_DUMP_CONTROL_DIRECTIVES = ("$dumpvars", "$dumpall", "$dumpoff", "$dumpon")
+
+
+def _stream_for(streams: Dict[str, ValueStream], identifier: str) -> ValueStream:
+    stream = streams.get(identifier)
+    if stream is None:
+        raise VCDParseError(f"value change for unknown identifier {identifier!r}")
+    return stream
+
+
+def _apply_value_change(
+    token: str,
+    ts: TokenStream,
+    streams: Dict[str, ValueStream],
+    time: int,
+) -> None:
+    """Record one value change; vector forms consume the following identifier token."""
+    first = token[:1].lower()
+    if first in "01xz" and len(token) > 1:
+        identifier = token[1:]
+        stream = _stream_for(streams, identifier)
+        if stream.width != 1:
+            raise VCDParseError(
+                f"scalar value used for {identifier!r}, declared width {stream.width}"
+            )
+        stream.add(time, first)
+        return
+    if first == "b" and len(token) > 1:
+        raw = token[1:]
+        stream = _stream_for(streams, ts.pop())
+        stream.add(time, _normalize_vector(raw, stream.width))
+        return
+    if first in ("r", "s"):
+        kind = "real" if first == "r" else "string"
+        raise VCDParseError(f"{kind} value changes are not supported")
+    raise VCDParseError(f"unsupported value-change token {token!r}")
+
+
+def _parse_dump_block(
+    directive: str,
+    ts: TokenStream,
+    streams: Dict[str, ValueStream],
+    time: int,
+) -> None:
+    """Parse ``$dumpvars``/``$dumpall``/``$dumpoff``/``$dumpon`` up to its ``$end``.
+
+    The block body uses exactly the same value-change grammar as the surrounding
+    stream, so the recorded values are part of the trace rather than skipped.
+    """
+    while True:
+        if ts.done():
+            raise VCDParseError(f"unterminated {directive}")
+        token = ts.pop()
+        if token == "$end":
+            return
+        if token.startswith("#"):
+            raise VCDParseError(f"timestamp {token!r} inside {directive} block")
+        if token == "$comment":
+            ts.collect_until_end()
+            continue
+        if token.startswith("$"):
+            raise VCDParseError(f"unsupported directive {token} inside {directive} block")
+        _apply_value_change(token, ts, streams, time)
+
+
 def parse_vcd_text(text: str) -> VCDFile:
     ts = TokenStream(text.split())
     scopes: List[str] = []
@@ -288,18 +355,17 @@ def parse_vcd_text(text: str) -> VCDFile:
 
     current_time = 0
     last_time = 0
-    in_dumpvars = False
 
     while not ts.done():
         token = ts.pop()
-        if token == "$dumpvars":
-            if in_dumpvars:
-                raise VCDParseError("nested $dumpvars")
-            in_dumpvars = True
+        if token == "$comment":
+            ts.collect_until_end()
             continue
-        if token == "$end" and in_dumpvars:
-            in_dumpvars = False
+        if token in _DUMP_CONTROL_DIRECTIVES:
+            _parse_dump_block(token, ts, streams, current_time)
             continue
+        if token == "$end":
+            raise VCDParseError("$end without a matching dump-control directive")
         if token.startswith("$"):
             raise VCDParseError(f"unsupported value-change directive {token}")
         if token.startswith("#"):
@@ -312,33 +378,8 @@ def parse_vcd_text(text: str) -> VCDFile:
             current_time = new_time
             last_time = max(last_time, current_time)
             continue
-        first = token[:1].lower()
-        if first in "01xz" and len(token) > 1:
-            identifier = token[1:]
-            stream = streams.get(identifier)
-            if stream is None:
-                raise VCDParseError(f"value change for unknown identifier {identifier!r}")
-            if stream.width != 1:
-                raise VCDParseError(
-                    f"scalar value used for {identifier!r}, declared width {stream.width}"
-                )
-            stream.add(current_time, first)
-            continue
-        if first == "b" and len(token) > 1:
-            raw = token[1:]
-            identifier = ts.pop()
-            stream = streams.get(identifier)
-            if stream is None:
-                raise VCDParseError(f"value change for unknown identifier {identifier!r}")
-            stream.add(current_time, _normalize_vector(raw, stream.width))
-            continue
-        if first in ("r", "s"):
-            kind = "real" if first == "r" else "string"
-            raise VCDParseError(f"{kind} value changes are not supported")
-        raise VCDParseError(f"unsupported value-change token {token!r}")
+        _apply_value_change(token, ts, streams, current_time)
 
-    if in_dumpvars:
-        raise VCDParseError("unterminated $dumpvars")
     return VCDFile(timescale=timescale, signals=signals, streams=streams, last_time=last_time)
 
 
