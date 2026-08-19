@@ -1,0 +1,20 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! early $end
+$var wire 1 " late $end
+$var wire 4 # later_bus [3:0] $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+$end
+#10
+1!
+#20
+1"
+#25
+b0011 #
+#30
+0"
+#35
+b0100 #
