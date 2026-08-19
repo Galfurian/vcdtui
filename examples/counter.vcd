@@ -1,0 +1,65 @@
+$date
+    2026-08-19
+$end
+$version
+    vcdtui example
+$end
+$timescale 1ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$var wire 1 " start $end
+$var wire 1 # dec $end
+$var wire 4 $ count [3:0] $end
+$var wire 1 % stop $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+0"
+0#
+b0011 $
+0%
+$end
+#5
+1!
+#10
+0!
+#15
+1!
+1"
+#20
+0!
+0"
+b0111 $
+#25
+1!
+#30
+0!
+1#
+b0110 $
+#35
+1!
+#40
+0!
+b0001 $
+#45
+1!
+#50
+0!
+b0000 $
+1%
+#55
+1!
+#60
+0!
+#65
+1!
+#70
+0!
+0#
+1"
+#75
+1!
+#80
+0!
+0"
