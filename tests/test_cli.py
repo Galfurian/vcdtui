@@ -63,9 +63,9 @@ class ParserTests(unittest.TestCase):
         with self.assertRaisesRegex(vcdtui.VCDParseError, "incompatible widths"):
             vcdtui.parse_vcd_text(text)
 
-    def test_real_values_are_explicitly_unsupported(self):
+    def test_real_value_conflicting_with_recorded_bits_is_error(self):
         text = SAMPLE + "r1.25 !\n"
-        with self.assertRaisesRegex(vcdtui.VCDParseError, "real value changes"):
+        with self.assertRaisesRegex(vcdtui.VCDParseError, "real value used for"):
             vcdtui.parse_vcd_text(text)
 
 
