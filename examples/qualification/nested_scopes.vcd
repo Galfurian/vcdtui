@@ -1,0 +1,72 @@
+$date nested hierarchy example $end
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$var wire 1 " reset $end
+$scope module dut $end
+$var wire 1 # start $end
+$var wire 1 $ stop $end
+$scope module control $end
+$var wire 3 % state [2:0] $end
+$var wire 1 & enable $end
+$var wire 1 ' done $end
+$upscope $end
+$scope module datapath $end
+$scope module counter $end
+$var wire 8 ( value [7:0] $end
+$var wire 1 ) dec $end
+$var wire 1 * zero $end
+$upscope $end
+$scope module accumulator $end
+$var wire 16 + value [15:0] $end
+$var wire 1 , carry $end
+$upscope $end
+$upscope $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+1"
+0#
+0$
+b000 %
+0&
+0'
+b00000101 (
+0)
+0*
+b0000000000000011 +
+0,
+$end
+#5
+1!
+#10
+0!
+0"
+1#
+1&
+b001 %
+#15
+1!
+#20
+0!
+0#
+1)
+b00000100 (
+b0000000000000100 +
+#25
+1!
+#30
+0!
+b010 %
+b00000011 (
+#35
+1!
+#40
+0!
+b000 %
+0)
+1*
+1'
+1$
