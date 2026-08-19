@@ -64,6 +64,7 @@ Up / Down, j / k    move within the focused pane
 Enter               expand/collapse focused scope
 Space               show/hide focused signal
 a / A               show all / hide all signals
+v                   choose focused vector display format
 
 Left / Right, h / l move cursor one VCD tick
 Ctrl+Left / Right   previous / next clean binary edge when supported
@@ -108,6 +109,12 @@ ASCII mode uses `-` for the high level. `x` and `z` remain explicit. Vector trac
 
 The cursor and markers are non-destructive: they change cell attributes rather than replacing the waveform glyph underneath them. Landing on `/`, `\`, or a bus label therefore does not erase trace evidence.
 
+### Per-signal vector formats
+
+Press `v` while a vector signal is focused to choose binary, hexadecimal, unsigned decimal, or signed decimal presentation for that signal. The underlying VCD value remains binary; the format affects only presentation. Scalar `0/1/x/z` values remain unchanged, and vectors containing `x` or `z` stay as bit patterns rather than being coerced to a number.
+
+See `docs/VALUE_FORMATS.md` for the exact semantics.
+
 ### Before/after inspection
 
 The inspector is hidden by default and toggled with `i`:
@@ -128,6 +135,10 @@ delta = B - A
 ```
 
 The delta is signed and remains exact in raw ticks and physical-time formatting.
+
+## Qualification corpus
+
+Hand-readable supported and deliberately malformed traces live under `examples/qualification/`. They cover nested scopes, aliases, unusual identifier codes, `x/z`, sparse initialization, exact times, and a richer interactive showcase. Generated simulator traces can be added under `examples/qualification/generated/` once simulator versions are pinned.
 
 ## Requirements
 
