@@ -1163,46 +1163,107 @@ def _range_boundary_for_key(
     return None
 
 
-def _show_help(stdscr) -> None:
+def _help_lines(*, ascii_only: bool) -> List[str]:
+    arrows = "<-/->" if ascii_only else "←/→"
+    ctrl_arrows = "Ctrl+<-/->" if ascii_only else "Ctrl+←/→"
+    return [
+        "vcdtui controls",
+        "Signals",
+        "  Tab                 switch signal-tree / waveform focus",
+        "  Up/Down, j/k        move within the focused pane",
+        "  Enter / Space       expand scope / toggle signal",
+        "  a / A               show all / hide all signals",
+        "Time & view",
+        f"  {arrows:<20} cursor one VCD tick",
+        f"  {ctrl_arrows:<20} previous / next clean binary edge",
+        "  Home / End          active-range start / end",
+        "  g                   goto exact tick or physical time",
+        "  < / >   + / -       pan / zoom viewport",
+        "  n/N  e/E  r/R  f/F transition / edge / rising / falling",
+        "Inspect",
+        "  i                   before/after inspector",
+        "  m / M               place marker A / B",
+        "  c                   clear markers",
+        "F1 / ?  close help                                      q  quit",
+    ]
+
+
+def _centered_panel_geometry(
+    height: int,
+    width: int,
+    content_width: int,
+    content_height: int,
+) -> Tuple[int, int, int, int]:
+    panel_width = min(max(24, content_width + 4), max(1, width))
+    panel_height = min(max(4, content_height + 2), max(1, height))
+    top = max(0, (height - panel_height) // 2)
+    left = max(0, (width - panel_width) // 2)
+    return top, left, panel_height, panel_width
+
+
+def _is_help_key(curses_module, key: int) -> bool:
+    f1 = getattr(curses_module, "KEY_F1", None)
+    return key == ord("?") or (f1 is not None and key == f1)
+
+
+def shortcut_bar(width: int, *, ascii_only: bool) -> str:
+    if width <= 0:
+        return ""
+    sep = " | " if ascii_only else " · "
+    arrows = "<- -> cursor" if ascii_only else "←→ cursor"
+    ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
+    candidates = [
+        ["Tab pane", "Space toggle", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "Space toggle", arrows, "+/- zoom", "F1/? help", "q quit"],
+        ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
+        [arrows, "F1/? help", "q quit"],
+        ["F1/? help", "q quit"],
+    ]
+    for items in candidates:
+        rendered = sep.join(items)
+        if len(rendered) <= width:
+            return rendered
+    return "?"[:width]
+
+
+def _show_help(stdscr, *, ascii_only: bool) -> None:
     import curses
 
-    lines = [
-        "vcdtui keys",
-        "",
-        "Tab            switch focus: signal tree / waveform",
-        "Up/Down j/k    move within focused pane",
-        "Enter          expand/collapse scope in tree",
-        "Space          show/hide focused signal",
-        "a / A          show all / hide all signals",
-        "Left/Right h/l move cursor by one VCD tick",
-        "Ctrl+Left/Right previous / next binary edge when supported",
-        "< / >          pan waveform viewport",
-        "+ / -          zoom in / out around cursor",
-        "n / N          next / previous transition",
-        "e / E          next / previous binary edge",
-        "r / R          next / previous rising edge",
-        "f / F          next / previous falling edge",
-        "Home / End     cursor to active range start / end",
-        "0 / $          aliases for Home / End",
-        "g              goto exact tick or physical time",
-        "i              show/hide before/after inspector",
-        "m / M          place or move marker A / B at cursor",
-        "c              clear both markers",
-        "?              this help",
-        "q              quit",
-        "",
-        "Lowercase temporal keys move forward; uppercase move backward.",
-        "Any key returns.",
-    ]
-    stdscr.erase()
+    lines = _help_lines(ascii_only=ascii_only)
     height, width = stdscr.getmaxyx()
-    for row, line in enumerate(lines[: max(0, height - 1)]):
-        attr = curses.A_BOLD if row == 0 else 0
-        _safe_addstr(stdscr, row, 0, line, attr)
-    if width < 56 and height > 0:
-        _safe_addstr(stdscr, height - 1, 0, "resize wider for full help")
-    stdscr.refresh()
-    stdscr.getch()
+    content_width = max((len(line) for line in lines), default=1)
+    top, left, panel_height, panel_width = _centered_panel_geometry(
+        height,
+        width,
+        content_width,
+        len(lines),
+    )
+
+    try:
+        panel = curses.newwin(panel_height, panel_width, top, left)
+        panel.keypad(True)
+        panel.erase()
+        try:
+            panel.box()
+        except curses.error:
+            pass
+        visible_rows = max(0, panel_height - 2)
+        section_headers = {"Signals", "Time & view", "Inspect"}
+        for row, line in enumerate(lines[:visible_rows], start=1):
+            attr = curses.A_BOLD if row == 1 or line in section_headers else 0
+            _safe_addstr(panel, row, 2, line, attr)
+        if len(lines) > visible_rows and panel_height >= 3:
+            _safe_addstr(panel, panel_height - 2, 2, "resize taller for full controls", curses.A_DIM)
+        panel.refresh()
+        panel.getch()
+    except curses.error:
+        # Very small or unusual terminals may reject a subwindow. Keep help usable.
+        stdscr.erase()
+        for row, line in enumerate(lines[: max(0, height - 1)]):
+            attr = curses.A_BOLD if row == 0 else 0
+            _safe_addstr(stdscr, row, 0, line, attr)
+        stdscr.refresh()
+        stdscr.getch()
 
 
 def _draw_ruler(
@@ -1224,8 +1285,8 @@ def _draw_ruler(
         width,
         ascii_only=ascii_only,
     )
-    _safe_addstr(stdscr, 2, x, labels, attrs["dim"])
-    _safe_addstr(stdscr, 3, x, rule, attrs["dim"])
+    _safe_addstr(stdscr, 1, x, labels, attrs["dim"])
+    _safe_addstr(stdscr, 2, x, rule, attrs["dim"])
 
     marker_columns: Dict[int, str] = {}
     for label, tick in (("A", state.marker_a), ("B", state.marker_b)):
@@ -1238,11 +1299,11 @@ def _draw_ruler(
             marker_columns[col] = label
     for col, label in marker_columns.items():
         attr = attrs["marker_a"] if label == "A" else attrs["marker_b"]
-        _safe_addstr(stdscr, 3, x + col, label, attr)
+        _safe_addstr(stdscr, 2, x + col, label, attr)
 
     if state.view_start <= state.cursor <= state.view_end:
         col = _cursor_column(state.cursor, state.view_start, state.view_end, width)
-        _safe_addstr(stdscr, 3, x + col, "^", attrs["cursor"])
+        _safe_addstr(stdscr, 2, x + col, "^", attrs["cursor"])
 
 
 def _draw_tui(
@@ -1261,20 +1322,17 @@ def _draw_tui(
     stdscr.erase()
     height, width = stdscr.getmaxyx()
     title = (
-        f"vcdtui cursor={state.cursor} ({vcd.timescale.format_tick(state.cursor)}) "
-        f"view={state.view_start}..{state.view_end}"
+        f"vcdtui  cursor {vcd.timescale.format_tick(state.cursor)}  "
+        f"view {vcd.timescale.format_tick(state.view_start)}..{vcd.timescale.format_tick(state.view_end)}"
     )
     _safe_addstr(stdscr, 0, 0, title, curses.A_BOLD)
-    _safe_addstr(
-        stdscr,
-        1,
-        0,
-        "Tab pane  Space toggle  arrows cursor/tree  +/- zoom  </> pan  n/e/r/f edges  m/M markers  ? help",
-        attrs["dim"],
-    )
 
     if height < 12 or width < 72:
         _safe_addstr(stdscr, 3, 0, "terminal too small; resize to at least 72x12")
+        if height >= 2:
+            shortcuts = shortcut_bar(width - 1, ascii_only=ascii_only)
+            shortcut_x = max(0, (width - len(shortcuts)) // 2)
+            _safe_addstr(stdscr, height - 2, shortcut_x, shortcuts, attrs["dim"])
         if state.status:
             _safe_addstr(stdscr, height - 1, 0, state.status)
         stdscr.refresh()
@@ -1295,9 +1353,9 @@ def _draw_tui(
     inspector_height = 0
     if state.show_inspector and remaining_panel_budget >= 4:
         inspector_height = min(8, max(4, height // 3), remaining_panel_budget)
-    main_bottom = height - 2 - marker_height - inspector_height
-    header_row = 4
-    content_row = 5
+    main_bottom = height - 3 - marker_height - inspector_height
+    header_row = 3
+    content_row = 4
     main_capacity = max(1, main_bottom - content_row + 1)
 
     tree_items = build_tree_items(all_signals, state.expanded_scopes)
@@ -1446,8 +1504,12 @@ def _draw_tui(
     marker_text = (" | " + " ".join(marker_status)) if marker_status else ""
     status = state.status or (
         f"pane={pane} | selected {selected_count}/{len(all_signals)} | "
-        f"range {range_start}..{range_end}{marker_text} | q quit"
+        f"range {range_start}..{range_end}{marker_text}"
     )
+    if height >= 2:
+        shortcuts = shortcut_bar(width - 1, ascii_only=ascii_only)
+        shortcut_x = max(0, (width - len(shortcuts)) // 2)
+        _safe_addstr(stdscr, height - 2, shortcut_x, shortcuts, attrs["dim"])
     _safe_addstr(stdscr, height - 1, 0, status)
     stdscr.refresh()
 
@@ -1541,6 +1603,9 @@ def run_tui(
 
             if key in (ord("q"), ord("Q")):
                 return
+            if _is_help_key(curses, key):
+                _show_help(stdscr, ascii_only=ascii_only)
+                continue
             if key == ord("\t"):
                 state.focus_pane = "tree" if state.focus_pane == "wave" else "wave"
                 continue
@@ -1704,8 +1769,6 @@ def run_tui(
                     )
             elif key == curses.KEY_RESIZE:
                 continue
-            elif key == ord("?"):
-                _show_help(stdscr)
 
     try:
         curses.wrapper(app)
