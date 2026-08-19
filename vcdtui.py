@@ -13,7 +13,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 MINIMUM_PYTHON = (3, 10)
 
