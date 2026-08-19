@@ -98,6 +98,12 @@ class ValueStream:
             return None
         return self.changes[index].value
 
+    def value_before(self, time: int) -> Optional[str]:
+        index = bisect_left(self.changes, time, key=lambda change: change.time) - 1
+        if index < 0:
+            return None
+        return self.changes[index].value
+
     def changes_between(self, start: int, end: int) -> Sequence[Change]:
         first = bisect_left(self.changes, start, key=lambda change: change.time)
         last = bisect_right(self.changes, end, key=lambda change: change.time)
@@ -123,6 +129,17 @@ class VCDFile:
     def find(self, pattern: str) -> List[Signal]:
         needle = pattern.casefold()
         return [signal for signal in self.signals if needle in signal.full_name.casefold()]
+
+
+@dataclass(frozen=True)
+class Inspection:
+    signal: Signal
+    before: Optional[str]
+    after: Optional[str]
+
+    @property
+    def changed(self) -> bool:
+        return self.before != self.after
 
 
 class TokenStream:
@@ -387,6 +404,17 @@ def resolve_range(vcd: VCDFile, start_text: Optional[str], end_text: Optional[st
     return start, end
 
 
+def inspect_at(signals: Sequence[Signal], cursor: int) -> List[Inspection]:
+    return [
+        Inspection(
+            signal=signal,
+            before=signal.stream.value_before(cursor),
+            after=signal.stream.value_at(cursor),
+        )
+        for signal in signals
+    ]
+
+
 def _event_times(signals: Sequence[Signal], start: int, end: int) -> List[int]:
     times = {start, end}
     seen_streams = set()
@@ -417,13 +445,13 @@ def _color_value(signal: Signal, value: str, enabled: bool) -> str:
     if not enabled or value == "?":
         return value
     if "x" in value:
-        color = "31"  # red
+        color = "31"
     elif "z" in value:
-        color = "35"  # magenta
+        color = "35"
     elif signal.width == 1:
-        color = "32"  # green
+        color = "32"
     else:
-        color = "36"  # cyan
+        color = "36"
     return f"\x1b[{color}m{value}\x1b[0m"
 
 
@@ -444,7 +472,7 @@ def render_dump(
 
     separator = " | " if ascii_only else " │ "
     cross = "+" if ascii_only else "┼"
-    horizontal = "-" if ascii_only else "─"
+    horizontal = "-" if ascii_only else " "
 
     def plain_line(cells: Sequence[str]) -> str:
         return separator.join(cell.ljust(widths[index]) for index, cell in enumerate(cells)).rstrip()
@@ -485,6 +513,248 @@ def _stdout_supports_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
 
 
+def _sample_ticks(start: int, end: int, width: int) -> List[int]:
+    if width <= 0:
+        return []
+    if width == 1 or start == end:
+        return [start] * width
+    span = end - start
+    return [start + (span * index) // (width - 1) for index in range(width)]
+
+
+def sample_waveform(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+) -> str:
+    ticks = _sample_ticks(start, end, width)
+    output: List[str] = []
+    for tick in ticks:
+        value = signal.stream.value_at(tick)
+        if value is None:
+            char = "?"
+        elif "x" in value:
+            char = "x"
+        elif "z" in value:
+            char = "z"
+        elif signal.width > 1:
+            char = "="
+        elif value == "1":
+            char = "-" if ascii_only else "‾"
+        else:
+            char = "_"
+        output.append(char)
+    return "".join(output)
+
+
+def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
+    if width <= 1 or start == end:
+        return 0
+    return min(width - 1, max(0, ((cursor - start) * (width - 1)) // (end - start)))
+
+
+def _safe_addstr(window, y: int, x: int, text: str, attr: int = 0) -> None:
+    height, width = window.getmaxyx()
+    if y < 0 or y >= height or x >= width:
+        return
+    available = max(0, width - x - 1)
+    if available <= 0:
+        return
+    try:
+        window.addstr(y, x, text[:available], attr)
+    except Exception:
+        pass
+
+
+def _prompt_goto(stdscr, vcd: VCDFile, start: int, end: int, status_row: int) -> Tuple[Optional[int], str]:
+    import curses
+
+    height, width = stdscr.getmaxyx()
+    if status_row >= height:
+        return None, "terminal too small for goto prompt"
+    prompt = "goto time/tick: "
+    stdscr.move(status_row, 0)
+    stdscr.clrtoeol()
+    _safe_addstr(stdscr, status_row, 0, prompt)
+    stdscr.refresh()
+    curses.echo()
+    try:
+        raw = stdscr.getstr(status_row, min(len(prompt), max(0, width - 2)), max(1, width - len(prompt) - 2))
+    finally:
+        curses.noecho()
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeError:
+        return None, "goto input is not valid UTF-8"
+    if not text:
+        return None, "goto cancelled"
+    try:
+        tick = vcd.timescale.parse_ticks(text)
+    except VCDTUIError as exc:
+        return None, str(exc)
+    if not start <= tick <= end:
+        return None, f"tick {tick} is outside the active range {start}..{end}"
+    return tick, ""
+
+
+def _init_curses_colors(curses, enabled: bool) -> Dict[str, int]:
+    attrs = {"scalar": 0, "vector": 0, "bad": 0, "cursor": 0, "dim": 0}
+    if not enabled or not curses.has_colors():
+        return attrs
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_CYAN, -1)
+        curses.init_pair(3, curses.COLOR_RED, -1)
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)
+        attrs.update(
+            scalar=curses.color_pair(1),
+            vector=curses.color_pair(2),
+            bad=curses.color_pair(3),
+            cursor=curses.color_pair(4) | curses.A_BOLD,
+            dim=curses.A_DIM,
+        )
+    except curses.error:
+        return {"scalar": 0, "vector": 0, "bad": 0, "cursor": 0, "dim": 0}
+    return attrs
+
+
+def _draw_tui(
+    stdscr,
+    vcd: VCDFile,
+    signals: Sequence[Signal],
+    start: int,
+    end: int,
+    cursor: int,
+    *,
+    ascii_only: bool,
+    attrs: Dict[str, int],
+    status: str,
+) -> int:
+    import curses
+
+    stdscr.erase()
+    height, width = stdscr.getmaxyx()
+    title = f"vcdtui  cursor={cursor} ({vcd.timescale.format_tick(cursor)})  range={start}..{end}"
+    _safe_addstr(stdscr, 0, 0, title, curses.A_BOLD)
+    _safe_addstr(stdscr, 1, 0, "←/→ cursor  0/$ bounds  g goto  q quit", attrs["dim"])
+
+    if height < 10 or width < 40:
+        _safe_addstr(stdscr, 3, 0, "terminal too small; resize to at least 40x10")
+        stdscr.refresh()
+        return cursor
+
+    name_width = min(max(12, max(len(signal.full_name) for signal in signals) + 1), max(12, width // 3))
+    wave_width = max(8, width - name_width - 2)
+    max_wave_rows = max(1, (height - 8) // 2)
+    shown = list(signals[:max_wave_rows])
+    cursor_col = _cursor_column(cursor, start, end, wave_width)
+    cursor_char = "|" if ascii_only else "│"
+
+    row = 3
+    for signal in shown:
+        name = signal.full_name[-name_width:].rjust(name_width)
+        wave = list(sample_waveform(signal, start, end, wave_width, ascii_only=ascii_only))
+        if wave:
+            wave[cursor_col] = cursor_char
+        value = signal.stream.value_at(cursor) or "?"
+        attr = attrs["vector"] if signal.width > 1 else attrs["scalar"]
+        if "x" in value or "z" in value:
+            attr = attrs["bad"]
+        _safe_addstr(stdscr, row, 0, name, attrs["dim"])
+        _safe_addstr(stdscr, row, name_width + 1, "".join(wave), attr)
+        _safe_addstr(stdscr, row, name_width + 1 + cursor_col, cursor_char, attrs["cursor"])
+        row += 1
+
+    row += 1
+    _safe_addstr(stdscr, row, 0, "at cursor: before -> after", curses.A_BOLD)
+    row += 1
+    inspections = inspect_at(shown, cursor)
+    for item in inspections:
+        if row >= height - 2:
+            break
+        before = item.before or "?"
+        after = item.after or "?"
+        marker = "*" if item.changed else " "
+        text = f"{marker} {item.signal.full_name:<{min(name_width, 28)}} {before:>8} -> {after:<8}"
+        attr = curses.A_BOLD if item.changed else 0
+        _safe_addstr(stdscr, row, 0, text, attr)
+        row += 1
+
+    if len(signals) > len(shown):
+        _safe_addstr(stdscr, height - 2, 0, f"showing {len(shown)}/{len(signals)} signals; browser arrives in M4", attrs["dim"])
+    if status:
+        _safe_addstr(stdscr, height - 1, 0, status)
+    stdscr.refresh()
+    return cursor
+
+
+def run_tui(
+    vcd: VCDFile,
+    signals: Sequence[Signal],
+    start: int,
+    end: int,
+    *,
+    ascii_only: bool,
+    color: bool,
+) -> None:
+    try:
+        import curses
+    except ImportError as exc:
+        raise VCDTUIError("interactive mode requires the Python curses module; use --dump") from exc
+
+    def app(stdscr) -> None:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.keypad(True)
+        attrs = _init_curses_colors(curses, color)
+        cursor = start
+        status = ""
+        while True:
+            _draw_tui(
+                stdscr,
+                vcd,
+                signals,
+                start,
+                end,
+                cursor,
+                ascii_only=ascii_only,
+                attrs=attrs,
+                status=status,
+            )
+            status = ""
+            key = stdscr.getch()
+            if key in (ord("q"), ord("Q")):
+                return
+            if key in (curses.KEY_LEFT, ord("h")):
+                cursor = max(start, cursor - 1)
+            elif key in (curses.KEY_RIGHT, ord("l")):
+                cursor = min(end, cursor + 1)
+            elif key == ord("0"):
+                cursor = start
+            elif key == ord("$"):
+                cursor = end
+            elif key in (ord("g"), ord("G")):
+                tick, status = _prompt_goto(stdscr, vcd, start, end, stdscr.getmaxyx()[0] - 1)
+                if tick is not None:
+                    cursor = tick
+            elif key == curses.KEY_RESIZE:
+                continue
+            elif key == ord("?"):
+                status = "M3 keys: left/right or h/l cursor, 0 start, $ end, g goto, q quit"
+
+    try:
+        curses.wrapper(app)
+    except curses.error as exc:
+        raise VCDTUIError(f"terminal UI initialization failed: {exc}; use --dump") from exc
+
+
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     path = _require_file(args, parser)
     vcd = parse_vcd(path)
@@ -515,7 +785,15 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise VCDTUIError("interactive mode requires a terminal; use --dump for non-interactive output")
-    raise VCDTUIError("interactive mode is planned for Milestone 3 and is not implemented yet")
+    run_tui(
+        vcd,
+        signals,
+        start,
+        end,
+        ascii_only=args.ascii,
+        color=not args.no_color,
+    )
+    return 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
