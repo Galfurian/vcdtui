@@ -38,7 +38,7 @@ Press `F1` or `?` for the full centered help. Common controls:
 Tab                 switch tree / waveform focus
 Up/Down, j/k        move in the focused pane
 Enter               expand/collapse scope
-Space               show/hide signal
+Space               show/hide the focused signal, or every signal in a scope
 a, Ctrl+A           show all signals, or hide all when all are shown
 A                   hide all signals
 v                   vector format menu (Up/Down, Enter, Esc)
