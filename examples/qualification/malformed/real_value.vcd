@@ -1,0 +1,7 @@
+$timescale 1 ns $end
+$scope module top $end
+$var real 1 ! temperature $end
+$upscope $end
+$enddefinitions $end
+#0
+r1.25 !
