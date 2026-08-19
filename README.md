@@ -9,9 +9,11 @@ The project targets Python 3.10+ and has two first-class interfaces:
 
 ## Status
 
-Milestone 1 provides the VCD parser and signal queries. Milestone 2 provides deterministic non-interactive timeline dumping. Milestone 3 adds the first interactive `curses` view with a cursor, exact goto, compact waveform sampling, colors, and before/after inspection.
+The course core is complete through Milestone 4.
 
-The project intentionally builds these layers in order: the interactive UI consumes the same parser, selected signals, exact-time model, and sparse transition streams used by non-interactive mode.
+The implementation now includes the VCD parser, exact time model, signal queries, deterministic `--dump`, interactive signal selection, pan/zoom, an exact cursor, goto, before/after inspection, and transition/edge navigation.
+
+The layers intentionally share one model: the interactive UI consumes the same parser, selected signals, sparse transition streams, and exact-time rules used by non-interactive mode.
 
 ## Current commands
 
@@ -44,40 +46,58 @@ The raw `tick` column is the source-of-truth timestamp. The `time` column is an 
 
 ## Interactive view
 
-Running without `--dump` requires stdin and stdout to be attached to a usable terminal. The program checks this before importing/initializing `curses`; non-interactive commands therefore remain independent of terminal setup.
+Running without `--dump` requires stdin and stdout to be attached to a usable terminal. The program checks this before importing or initializing `curses`; non-interactive commands therefore remain independent of terminal setup.
 
-Current M3 controls:
+Course-core controls:
 
 ```text
-Left / Right     move cursor one VCD tick
-h / l            same as Left / Right
-0                cursor to active range start
-$                cursor to active range end
-g                goto exact tick or physical time
-?                show key help
-q                quit
+Up / Down       focus a signal in the browser
+j / k           same as Down / Up
+Space           show or hide the focused signal
+a / A           show all / hide all signals
+
+Left / Right    move cursor one VCD tick
+h / l           same as Left / Right
+< / >           pan the waveform viewport
++ / -           zoom in / out around the cursor
+
+n / N           next / previous transition of focused signal
+r / R           next / previous rising edge of focused signal
+f / F           next / previous falling edge of focused signal
+
+0               cursor to active range start
+$               cursor to active range end
+g               goto exact tick or physical time
+?               full key help
+q               quit
 ```
 
-The active range is the same exact `--from` / `--to` range used by `--dump`.
+Lowercase navigation keys move forward in time; uppercase variants move backward. Rising and falling edges are recognized only for clean scalar `0 -> 1` and `1 -> 0` transitions. `x` and `z` transitions are not guessed into edges.
 
-At the cursor the TUI shows, for every visible selected signal:
+The active range is the exact `--from` / `--to` range. Pan and zoom change only the viewport inside that range. Cursor and edge navigation remain exact in raw VCD ticks; when navigation moves outside the current viewport, the viewport recenters without changing its span.
+
+At the cursor the TUI shows, for visible selected signals:
 
 ```text
 before -> after
 ```
 
-with the following precise semantics:
+with the precise semantics:
 
 ```text
 before = last value whose VCD timestamp is strictly less than cursor
- after = value after all changes at cursor have been applied
+after  = value after all changes at cursor have been applied
 ```
 
-A `*` marks signals for which those values differ. This makes an edge such as `count: 0001 -> 0000` and `stop: 0 -> 1` directly visible at the same timestamp.
+A `*` marks signals for which those values differ. This makes simultaneous evidence such as `count: 0001 -> 0000` and `stop: 0 -> 1` directly visible at one timestamp.
 
-The minimal waveform uses `_`/`‾` for scalar low/high states in Unicode mode (`_`/`-` in ASCII mode), `x`/`z` for unknown/high-impedance states, and `=` as a compact vector-state track. A separate vertical cursor overlays the waveform.
+The waveform uses `_`/`‾` for scalar low/high states in Unicode mode (`_`/`-` in ASCII mode), `x`/`z` for unknown/high-impedance states, and `=` as a compact vector-state track. A separate vertical cursor overlays the waveform.
 
-Signal browsing, pan/zoom, and edge-to-edge navigation are intentionally M4 work.
+## Course-core boundary
+
+Milestones 1 through 4 define the complete teaching-oriented core. Features such as dual markers, command mode, configuration files, mouse interaction, and large-file indexing are intentionally post-core and are not required for qualification.
+
+See `docs/M4_COURSE_CORE.md` for the navigation semantics and completion boundary.
 
 ## Requirements
 
@@ -98,4 +118,4 @@ python3 vcdtui.py examples/counter.vcd --find count
 python3 vcdtui.py examples/counter.vcd --signals clk,count,stop --dump --ascii --no-color
 ```
 
-See `DESIGN.md` for the project contract, supported VCD subset, data model, exact time rules, TTY behavior, temporal semantics, and milestones.
+See `DESIGN.md` for the project contract, supported VCD subset, data model, exact time rules, TTY behavior, temporal semantics, and milestone boundary.
