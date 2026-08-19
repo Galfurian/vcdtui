@@ -397,6 +397,7 @@ previous finds nothing:
 ```text
 name       the whole name, or the whole name with its declared bit range
 path       a trailing run of its scopes, anchored at a "."
+glob       a hierarchical pattern, when the selector contains * or ?
 substring  anywhere in the name
 ```
 
@@ -404,6 +405,34 @@ Anchoring is what makes `dut4.clk` mean the `clk` inside `dut4`, while `ut4.clk`
 does not name a path at all. Ordering the tiers means a precise selector is never
 widened: `clk` selects the top-level `clk` when the design has one, and every
 `clk` in the design only when it does not.
+
+### Globs
+
+Globs use the shell convention with `.` as the separator: `*` and `?` match
+within one hierarchy level, `**` spans any number of levels including none.
+Keeping the two distinct is the reason a glob is anchored at the root rather than
+floated the way a path selector is; a pattern that matched at any depth on its
+own would make `**` mean nothing.
+
+```text
+tb.*            the signals declared directly in tb
+tb.**           everything below tb
+**.clk          every clk, at any depth
+tb.**.clk       tb.clk and every clk below it
+dut?.value      one character inside a level, never across one
+count*          no separator: a leaf at any depth, as in an unrooted gitignore
+```
+
+An anchored pattern that matches nothing is retried at every scope boundary, so
+`dut?.value` still works without naming the testbench. The tiers report which one
+matched, because a glob is a deliberate request for a set of signals and must not
+produce the ambiguity warning that a bare leaf name does.
+
+`fnmatch` is not used: its `*` crosses separators and its `[...]` is a character
+class, which would make a declared bit range unquotable. The translation is a
+per-segment walk into one `re` pattern, matched against the name with a trailing
+separator so that `**` can carry its own and span zero scopes. Substring matching
+is not attempted for a glob, so a pattern that matches nothing fails saying so.
 
 ### Rooting the view at a scope
 

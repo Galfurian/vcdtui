@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import traceback
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 __version__ = "0.2.0"
 
@@ -693,6 +694,47 @@ def _print_signals(signals: Iterable[Signal]) -> None:
         print(signal.full_name)
 
 
+_GLOB_CHARS = "*?"
+
+
+def _is_glob(selector: str) -> bool:
+    return any(char in selector for char in _GLOB_CHARS)
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """Compile a hierarchical glob, with "." as the separator.
+
+    Follows the shell convention: "*" and "?" stay inside one level, "**" spans
+    any number of levels including none. A pattern naming no separator matches a
+    leaf at any depth, as an unrooted gitignore pattern does. Only "*" and "?"
+    are special, so a declared bit range can be typed out literally.
+
+    Both the pattern and the name are matched with a trailing separator, which is
+    what lets "**" carry its own and so span zero scopes in "tb.**.clk".
+    """
+    if "." not in pattern:
+        pattern = f"**.{pattern}"
+    parts: List[str] = []
+    for segment in pattern.split("."):
+        if segment == "**":
+            parts.append(r"(?:[^.]+\.)*")
+            continue
+        for char in segment:
+            if char == "*":
+                parts.append(r"[^.]*")
+            elif char == "?":
+                parts.append(r"[^.]")
+            else:
+                parts.append(re.escape(char))
+        parts.append(r"\.")
+    return re.compile("".join(parts), re.IGNORECASE)
+
+
+def _glob_matches(name: str, pattern: str) -> bool:
+    """True when ``pattern`` matches the whole of ``name``, counted from the root."""
+    return _glob_regex(pattern).fullmatch(f"{name}.") is not None
+
+
 def scope_paths(vcd: VCDFile) -> List[str]:
     """Every scope path in the trace, in declaration order and without repeats.
 
@@ -788,6 +830,59 @@ def _describe_ambiguity(selector: str, matched: Sequence[Signal]) -> str:
     )
 
 
+def _glob_patterns(selector: str) -> List[re.Pattern[str]]:
+    """The glob readings of a selector, most specific first."""
+    patterns = [_glob_regex(selector)]
+    if "." in selector:
+        patterns.append(_glob_regex(f"**.{selector}"))
+    return patterns
+
+
+def _glob_predicate(pattern: re.Pattern[str]) -> Callable[[Signal], bool]:
+    def matches(signal: Signal) -> bool:
+        return any(
+            pattern.fullmatch(f"{name}.") is not None for name in _names_of(signal)
+        )
+
+    return matches
+
+
+def _names_of(signal: Signal) -> Tuple[str, str]:
+    """The two forms a selector may name: with and without the bit range."""
+    return signal.full_name.casefold(), signal.display_name.casefold()
+
+
+def _resolve_selector(vcd: VCDFile, selector: str) -> Tuple[List[int], str]:
+    """Return the signal indexes a selector matches, and the tier that found them.
+
+    Tiers are tried narrowest first and the first non-empty one wins, so a
+    precise selector is never widened by a looser reading of it. The tier is
+    reported because it decides whether matching several signals is worth a
+    warning.
+    """
+    needle = selector.casefold()
+    tiers: List[Tuple[str, Callable[[Signal], bool]]] = [
+        ("name", lambda signal: needle in _names_of(signal)),
+        (
+            "path",
+            lambda signal: any(_matches_path(name, needle) for name in _names_of(signal)),
+        ),
+    ]
+    if _is_glob(selector):
+        # Anchored first, then retried at every scope boundary. An anchored "*.clk"
+        # therefore means the clk one level below the root, and only a pattern
+        # that matches nothing there is allowed to float like a path selector.
+        tiers += [("glob", _glob_predicate(pattern)) for pattern in _glob_patterns(selector)]
+    else:
+        tiers.append(("substring", lambda signal: needle in signal.full_name.casefold()))
+
+    for tier, predicate in tiers:
+        matches = [index for index, signal in enumerate(vcd.signals) if predicate(signal)]
+        if matches:
+            return matches, tier
+    return [], "none"
+
+
 def select_signals(
     vcd: VCDFile,
     selectors: Optional[str],
@@ -812,28 +907,13 @@ def select_signals(
 
     selected_indexes: Set[int] = set()
     for selector in requested:
-        needle = selector.casefold()
-        matches = [
-            index
-            for index, signal in enumerate(vcd.signals)
-            if needle in (signal.full_name.casefold(), signal.display_name.casefold())
-        ]
-        if not matches:
-            matches = [
-                index
-                for index, signal in enumerate(vcd.signals)
-                if _matches_path(signal.full_name.casefold(), needle)
-                or _matches_path(signal.display_name.casefold(), needle)
-            ]
-        if not matches:
-            matches = [
-                index
-                for index, signal in enumerate(vcd.signals)
-                if needle in signal.full_name.casefold()
-            ]
+        matches, tier = _resolve_selector(vcd, selector)
         if not matches:
             raise VCDTUIError(f"requested signal {selector!r} was not found")
-        if warnings is not None and len(matches) > 1:
+        # A glob asks for a set of signals on purpose, so listing them back as
+        # candidates would be noise. Every other tier matching more than one
+        # signal means the selector was less specific than it looked.
+        if warnings is not None and len(matches) > 1 and tier != "glob":
             warnings.append(
                 _describe_ambiguity(selector, [vcd.signals[index] for index in matches])
             )

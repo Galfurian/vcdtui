@@ -72,6 +72,7 @@ Vector display format is per signal. The underlying VCD value remains unchanged,
 tb.dut4.clk     the whole name, with or without its [msb:lsb] range
 dut4.clk        a trailing run of scopes, anchored at a "."
 clk             a leaf name: the top-level clk if there is one, else every clk
+tb.dut?.value   a glob, when the selector contains * or ?
 in              a substring, only when nothing above matched
 ```
 
@@ -89,6 +90,28 @@ vcdtui: warning: 'clk' matched 3 signals; select one with its path:
 
 `--list` prints every full path, one per line, and `--find PATTERN` prints the
 matching ones. Both are pasteable straight back into `--signals`.
+
+### Globs
+
+Globs follow the shell convention with `.` as the separator: `*` and `?` stay
+inside one hierarchy level, `**` crosses levels. Quote them, or the shell will
+expand them first.
+
+```bash
+vcdtui counter.vcd -s 'tb_counter.*'      # the signals directly in tb_counter
+vcdtui counter.vcd -s 'tb_counter.**'     # everything below it as well
+vcdtui counter.vcd -s '**.clk'            # every clk in the design
+vcdtui counter.vcd -s 'dut?.value'        # value in dut4 and in dut8
+```
+
+A glob is matched from the root first, so `*.clk` is the `clk` one level down and
+not every `clk` in the design. Only if nothing matches there is the pattern
+retried at each scope boundary, which is what lets `dut?.value` work without
+naming the testbench. `*` and `?` are the only special characters, so a declared
+bit range can be typed out: `-s '**.value[7:0]'`.
+
+Unlike a bare leaf name, a glob is a deliberate request for a set of signals, so
+matching several of them is not reported as ambiguous.
 
 ### Working inside one instance
 
