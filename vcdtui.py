@@ -1437,6 +1437,10 @@ def render_timeline_ruler(
     return "".join(labels), "".join(rule)
 
 
+# Ctrl+A arrives as the raw control code, not as a named curses key.
+_CTRL_A = 1
+
+
 def _ctrl_horizontal_direction(curses_module, key: int) -> Optional[bool]:
     """Return False/True for Ctrl+Left/Ctrl+Right when terminfo exposes them."""
     try:
@@ -1479,7 +1483,8 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "  Tab                 switch signal-tree / waveform focus",
         "  Up/Down, j/k        move within the focused pane",
         "  Enter / Space       expand scope / toggle signal",
-        "  a / A               show all / hide all signals",
+        "  a / Ctrl+A          show all signals, or hide all when all are shown",
+        "  A                   hide all signals",
         "  v                   value format for focused vector",
         "Time & view",
         f"  {arrows:<20} cursor one VCD tick",
@@ -1521,7 +1526,7 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
     arrows = "<- -> cursor" if ascii_only else "←→ cursor"
     ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
     candidates = [
-        ["Tab pane", "Space toggle", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "Space toggle", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
         ["Tab pane", "Space toggle", "v format", arrows, "+/- zoom", "F1/? help", "q quit"],
         ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
         [arrows, "F1/? help", "q quit"],
@@ -1532,6 +1537,11 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
         if len(rendered) <= width:
             return rendered
     return "?"[:width]
+
+
+def toggle_all_selection(selected: Sequence[bool]) -> List[bool]:
+    """Show every signal, or hide them all when every one is already shown."""
+    return [not all(selected)] * len(selected)
 
 
 def _prompt_value_format(stdscr, signal: Signal, current: str) -> Optional[str]:
@@ -2034,11 +2044,14 @@ def run_tui(
                         state.selected[index] = False
                 continue
 
-            if key == ord("a"):
-                state.selected[:] = [True] * len(all_signals)
+            if key in (ord("a"), _CTRL_A):
+                state.selected[:] = toggle_all_selection(state.selected)
+                shown = sum(state.selected)
+                state.status = "all signals shown" if shown else "all signals hidden"
                 continue
             if key == ord("A"):
                 state.selected[:] = [False] * len(all_signals)
+                state.status = "all signals hidden"
                 continue
             if key in (ord("v"), ord("V")):
                 signal_index = _navigation_signal_index(all_signals, state)
