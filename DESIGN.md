@@ -187,7 +187,20 @@ string values:     sIDLE
 
 Upper/lower case `X/Z` is normalized.
 
-Vectors are normalized to their declared width. Short binary values are zero-extended; short values beginning in `x` or `z` are extended with that state. Values wider than the declaration are rejected.
+Vectors are normalized to their declared width. Short binary values are
+zero-extended; short values beginning in `x` or `z` are extended with that
+state. A value wider than the declaration is accepted when the excess is
+redundant extension of what remains, because nothing is lost by dropping it:
+
+```text
+declared width 4
+  b1010        -> 1010
+  b1           -> 0001
+  bx           -> xxxx
+  b000001010   -> 1010      redundant zeros
+  bxxxxxx      -> xxxx      redundant x extension
+  b111110101   -> rejected  significant bits beyond the width
+```
 
 Real and string values are not bit vectors, so they are stored verbatim and are
 never width-normalized, radix-converted or interpreted as `x`/`z`. A real value
@@ -213,9 +226,15 @@ render as labelled bus tracks.
 ### Explicitly unsupported initially
 
 ```text
+extended VCD (EVCD)
 analog extensions
 non-standard/exotic VCD extensions
 ```
+
+Extended VCD is a different format rather than a dialect of this one: it records
+port direction and drive strength instead of plain value changes. It is detected
+by `$var port` or `$dumpports` and named in the error, instead of failing token
+by token on a grammar it does not follow.
 
 Unsupported constructs should produce a clear error identifying the construct.
 

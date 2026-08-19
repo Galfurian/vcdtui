@@ -352,16 +352,33 @@ def _normalize_real(value: str) -> str:
 
 
 def _normalize_vector(value: str, width: int) -> str:
+    """Size a binary value to the declared width, as IEEE 1364 defines it.
+
+    Short values are left-extended: with 0, or with x/z when the value starts
+    that way. A longer value is accepted only when the excess is redundant
+    extension of what remains, since nothing is then lost; an overlong value
+    carrying significant bits is a real inconsistency and is rejected.
+    """
     bits = value.lower()
     if not bits or any(ch not in "01xz" for ch in bits):
         raise VCDParseError(f"unsupported binary vector value {value!r}")
     if len(bits) > width:
-        raise VCDParseError(f"vector value {value!r} exceeds declared width {width}")
-    if len(bits) < width:
+        excess, bits = bits[: len(bits) - width], bits[len(bits) - width :]
+        extension = bits[0] if bits[0] in "xz" else "0"
+        if any(ch != extension for ch in excess):
+            raise VCDParseError(f"vector value {value!r} exceeds declared width {width}")
+    elif len(bits) < width:
         pad = bits[0] if bits[0] in "xz" else "0"
         bits = pad * (width - len(bits)) + bits
     return bits
 
+
+# Extended VCD is a different format, not a dialect of this one: it records port
+# direction and drive strength instead of plain value changes.
+_EVCD_MESSAGE = (
+    "this is an extended VCD (EVCD) file, which records port direction and "
+    "strength rather than plain value changes; vcdtui reads standard VCD"
+)
 
 # Runtime dump-control directives. Each opens a block of value changes that is
 # terminated by $end and carries the timestamp currently in effect.
@@ -415,13 +432,13 @@ def _apply_value_change(
             )
         stream.add(time, first)
         return
-    if first == "b" and len(token) > 1:
+    if first == "b":
         raw = token[1:]
         stream = _stream_for(streams, ts.pop())
         _require_kind(stream, "bit")
         stream.add(time, _normalize_vector(raw, stream.width))
         return
-    if first == "r" and len(token) > 1:
+    if first == "r":
         raw = token[1:]
         stream = _stream_for(streams, ts.pop())
         _adopt_kind(stream, "real")
@@ -456,6 +473,8 @@ def _parse_value_change_step(
         return current_time, last_time
     if token == "$end":
         raise VCDParseError("$end without a matching dump-control directive")
+    if token.startswith("$dumpports"):
+        raise VCDParseError(_EVCD_MESSAGE)
     if token.startswith("$"):
         raise VCDParseError(f"unsupported value-change directive {token}")
     if token.startswith("#"):
@@ -559,6 +578,8 @@ def _parse_vcd(ts: TokenStream) -> VCDFile:
             if len(parts) < 4:
                 raise VCDParseError("invalid $var directive")
             var_type, width_text, identifier = parts[:3]
+            if var_type.lower() == "port":
+                raise VCDParseError(_EVCD_MESSAGE)
             if not width_text.isdigit() or int(width_text) <= 0:
                 raise VCDParseError(f"invalid width in $var: {width_text!r}")
             width = int(width_text)
