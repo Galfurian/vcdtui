@@ -385,6 +385,39 @@ next/previous falling edge
 
 The semantics of "before" and "after" must be defined against VCD timestamps and tested. The UI reports evidence from the trace; it does not infer RTL intent.
 
+## Drawing a waveform
+
+A terminal column is an interval of ticks, not a sampled tick. `_column_edges`
+partitions the viewport into `width` half-open intervals and each column
+summarises everything recorded inside its own:
+
+```text
+0 changes    the held level, or the bus value centred over the run
+1 change     the transition: / rising, \ falling, | a bus boundary
+2 or more    ▓ (# under --ascii): too dense to resolve, with a count in the title
+```
+
+Sampling one tick per column instead aliases, and aliasing in a waveform viewer
+is not a coarse picture but a false one. A clock toggling every 5 ticks, viewed
+at 20 ticks per column, was drawn as a flat line: 241 transitions reported as a
+signal that never moved. At 2 ticks per column the same clock was drawn with its
+duty cycle appearing to change halfway across the screen. Neither is
+recoverable by the reader, because nothing in the picture says it is wrong.
+
+The dense glyph carries a count on the title line, because a block on its own
+says only "something"; `▓ 37 changes in this column` says what and how far to
+zoom. A transition needs a value to come *from*, so the trace's opening value is
+not an edge, while a change on the first tick of a viewport that starts mid-trace
+is one.
+
+A bus label is drawn only when it fits its run entirely. `0000` truncated to `0`
+reads as the value being zero, which is the same kind of confident wrong answer
+as the flat clock, so a run too narrow for its label is left blank and the user
+zooms in.
+
+The value column and the before/after inspector remain exact at the cursor tick
+and stay authoritative: the track summarises, they measure.
+
 ## Search and signal selection
 
 The first implementation may use deterministic case-insensitive substring search. A third-party fuzzy matching package is not permitted.

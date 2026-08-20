@@ -32,6 +32,19 @@ signal tree | shown @cursor | waveform
 
 The signal tree follows nested VCD scopes, the middle pane shows the exact value at the cursor, and the waveform pane provides an exact time ruler, pan/zoom, transition navigation, markers, and scalar/bus rendering.
 
+Each column of the waveform is an interval of ticks, and it summarises what
+happens inside it rather than sampling one tick:
+
+```text
+‾ _        a held level              ─ 0011 ─   a held bus value
+/ \        a single transition        │          a bus changes here
+▓          several changes: too dense to resolve, zoom in
+```
+
+`▓` (`#` under `--ascii`) is how vcdtui says it cannot draw what is there; the
+title line reports how many changes the column is hiding. The value column and
+the before/after inspector are always exact at the cursor tick.
+
 Press `F1` or `?` for the full centered help. Common controls:
 
 ```text

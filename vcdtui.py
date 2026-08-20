@@ -11,6 +11,7 @@ import traceback
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import (
     Callable,
@@ -1288,44 +1289,99 @@ def _stdout_supports_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
 
 
-def _sample_ticks(start: int, end: int, width: int) -> List[int]:
+@lru_cache(maxsize=64)
+def _column_edge_tuple(start: int, end: int, width: int) -> Tuple[int, ...]:
+    """Cached form of :func:`_column_edges`.
+
+    The viewport only changes on pan, zoom or resize, while the ruler asks for a
+    column once per grid tick, so every call inside one frame is a cache hit.
+    """
     if width <= 0:
-        return []
-    if width == 1 or start == end:
-        return [start] * width
+        return ()
     span = end - start
-    return [start + (span * index) // (width - 1) for index in range(width)]
+    return tuple(start + (span * index) // width for index in range(width + 1))
 
 
-def sample_waveform(
-    signal: Signal,
-    start: int,
-    end: int,
-    width: int,
-    *,
-    ascii_only: bool,
-) -> str:
-    """Legacy compact state sampling kept for deterministic tests/API compatibility."""
-    ticks = _sample_ticks(start, end, width)
-    output: List[str] = []
-    for tick in ticks:
-        value = signal.stream.value_at(tick)
-        if value is None:
-            char = "?"
-        elif signal.stream.kind != "bit":
-            char = "="
-        elif "x" in value:
-            char = "x"
-        elif "z" in value:
-            char = "z"
-        elif signal.width > 1:
-            char = "="
-        elif value == "1":
-            char = "-" if ascii_only else "‾"
-        else:
-            char = "_"
-        output.append(char)
-    return "".join(output)
+def _column_edges(start: int, end: int, width: int) -> List[int]:
+    """The ``width + 1`` tick boundaries that partition a viewport into columns.
+
+    Column ``c`` covers ``[edges[c], edges[c + 1])``, except the last, which
+    closes inclusively so the final tick of the viewport is drawn. Sampling one
+    tick per column instead aliases: a clock toggling faster than one column per
+    period came out as a flat line, which is a false picture rather than a
+    coarse one.
+    """
+    return list(_column_edge_tuple(start, end, width))
+
+
+def _column_span(edges: Sequence[int], column: int, end: int) -> Tuple[int, int]:
+    """The half-open tick range a column covers; the last one closes on ``end``."""
+    low = edges[column]
+    high = edges[column + 1] if column + 1 < len(edges) - 1 else end + 1
+    return low, max(high, low)
+
+
+def changes_in_column(
+    signal: Signal, start: int, end: int, width: int, column: int
+) -> int:
+    """How many recorded changes fall inside one column.
+
+    Exposed because a column drawn as "too dense to resolve" has to be able to
+    say how much it is hiding; a glyph on its own teaches nothing.
+    """
+    edges = _column_edges(start, end, width)
+    if not edges or not 0 <= column < width:
+        return 0
+    low, high = _column_span(edges, column, end)
+    first, last = _change_range(signal.stream, low, high, start)
+    return last - first
+
+
+def _change_range(
+    stream: ValueStream, low: int, high: int, view_start: int
+) -> Tuple[int, int]:
+    """Index range ``[first, last)`` of the changes in ``[low, high)``.
+
+    Returns indexes rather than the changes themselves: zoomed all the way out a
+    single column can cover hundreds of thousands of changes, and slicing them
+    out to count them cost 15 ms per track on a 400k-change trace.
+
+    The trace's opening value is excluded, because a transition needs a value to
+    come from. A change landing on the first tick of the viewport is real
+    whenever an earlier value exists, which it does when the view starts
+    mid-trace.
+    """
+    first = bisect_left(stream.changes, low, key=lambda change: change.time)
+    last = bisect_left(stream.changes, high, key=lambda change: change.time)
+    if (
+        first < last
+        and stream.changes[first].time == view_start
+        and stream.value_before(view_start) is None
+    ):
+        first += 1
+    return first, last
+
+
+def _level_glyph(value: Optional[str], high: str) -> str:
+    """The glyph for a held scalar level."""
+    if value is None:
+        return "?"
+    if "x" in value:
+        return "x"
+    if "z" in value:
+        return "z"
+    return high if value == "1" else "_"
+
+
+def _level_glyph(value: Optional[str], high: str) -> str:
+    """The glyph for a held scalar level."""
+    if value is None:
+        return "?"
+    if "x" in value:
+        return "x"
+    if "z" in value:
+        return "z"
+    return high if value == "1" else "_"
 
 
 def render_scalar_track(
@@ -1336,27 +1392,43 @@ def render_scalar_track(
     *,
     ascii_only: bool,
 ) -> str:
-    ticks = _sample_ticks(start, end, width)
+    """Draw one column per tick interval, summarising what happens inside it.
+
+    A column holding two or more changes cannot show them, so it says so instead
+    of picking one: sampling a single tick per column drew a clock toggling
+    faster than the column width as a flat line.
+    """
+    edges = _column_edge_tuple(start, end, width)
+    if not edges:
+        return ""
+    dense = "#" if ascii_only else "▓"
+    high = "-" if ascii_only else "‾"
     output: List[str] = []
-    previous: Optional[str] = None
-    for tick in ticks:
-        value = signal.stream.value_at(tick)
-        if previous == "0" and value == "1":
-            char = "/"
-        elif previous == "1" and value == "0":
-            char = "\\"
-        elif value is None:
-            char = "?"
-        elif "x" in value:
-            char = "x"
-        elif "z" in value:
-            char = "z"
-        elif value == "1":
-            char = "-" if ascii_only else "‾"
+    for column in range(width):
+        low, stop = _column_span(edges, column, end)
+        first, last = _change_range(signal.stream, low, stop, start)
+        if stop > low:
+            leaving = signal.stream.value_at(stop - 1)
         else:
-            char = "_"
-        output.append(char)
-        previous = value
+            # Zoomed in past one tick per column, some columns cover no ticks at
+            # all. One sitting on a change tick must not show the new level: the
+            # change belongs to the column that actually contains the tick, and
+            # this one belongs to the run it sits in.
+            leaving = signal.stream.value_before(low)
+            if leaving is None:
+                leaving = signal.stream.value_at(low)
+        if last - first >= 2:
+            output.append(dense)
+            continue
+        if last - first == 1:
+            entering = signal.stream.value_before(signal.stream.changes[first].time)
+            if (entering, leaving) == ("0", "1"):
+                output.append("/")
+                continue
+            if (entering, leaving) == ("1", "0"):
+                output.append("\\")
+                continue
+        output.append(_level_glyph(leaving, high))
     return "".join(output)
 
 
@@ -1369,30 +1441,42 @@ def render_bus_track(
     ascii_only: bool,
     display_format: str = "binary",
 ) -> str:
-    if width <= 0:
+    """Draw a bus as held runs separated by the columns where it changes.
+
+    A column holding one change is a boundary, one holding several is marked
+    dense, and a run of unchanged columns carries the centred value.
+    """
+    edges = _column_edge_tuple(start, end, width)
+    if not edges:
         return ""
-    ticks = _sample_ticks(start, end, width)
-    raw_values = [signal.stream.value_at(tick) or "?" for tick in ticks]
     horizontal = "-" if ascii_only else "─"
     boundary = "|" if ascii_only else "│"
-    line = [horizontal] * width
+    dense = "#" if ascii_only else "▓"
+
+    line: List[str] = []
+    for column in range(width):
+        low, stop = _column_span(edges, column, end)
+        first, last = _change_range(signal.stream, low, stop, start)
+        count = last - first
+        line.append(dense if count >= 2 else boundary if count == 1 else horizontal)
 
     run_start = 0
     while run_start < width:
-        raw_value = raw_values[run_start]
-        run_end = run_start + 1
-        while run_end < width and raw_values[run_end] == raw_value:
+        if line[run_start] != horizontal:
+            run_start += 1
+            continue
+        run_end = run_start
+        while run_end < width and line[run_end] == horizontal:
             run_end += 1
-        if run_start > 0:
-            line[run_start] = boundary
-        content_start = run_start + (1 if run_start > 0 else 0)
-        available = max(0, run_end - content_start)
-        if available > 0:
-            label = format_signal_value(signal, raw_value, display_format)[:available]
-            label_start = content_start + max(0, (available - len(label)) // 2)
+        room = run_end - run_start
+        raw_value = signal.stream.value_at(edges[run_start]) or "?"
+        label = format_signal_value(signal, raw_value, display_format)
+        # A truncated label is a confident wrong answer: "0000" cut to "0" reads
+        # as the value being 0. Leave the run blank and let the user zoom in.
+        if len(label) <= room:
+            label_start = run_start + (room - len(label)) // 2
             for offset, char in enumerate(label):
-                if label_start + offset < run_end:
-                    line[label_start + offset] = char
+                line[label_start + offset] = char
         run_start = run_end
     return "".join(line)
 
@@ -1413,25 +1497,50 @@ def render_waveform_track(
     )
 
 
-def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
-    """The column that shows ``cursor``, defined by how the tracks are sampled.
+def column_density_note(
+    signal: Signal,
+    cursor: int,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+) -> str:
+    """What a dense column is hiding, or "" when it is hiding nothing.
 
-    A column shows exactly one tick, picked by ``_sample_ticks``, so the cursor
-    belongs to the first column whose tick is at or after it. Deriving that with
-    the inverse formula truncates a second time and lands one column early: the
-    cursor then sits beside a transition boundary while the value readout, which
-    is exact, already reports the value from the other side of it. Searching the
-    sampled ticks cannot disagree with them.
+    A glyph on its own teaches nothing: the count is what tells the reader that
+    the block means "zoom in", and how far.
     """
-    if width <= 1 or start == end:
+    if width <= 0:
+        return ""
+    column = _cursor_column(cursor, start, end, width)
+    count = changes_in_column(signal, start, end, width, column)
+    if count < 2:
+        return ""
+    dense = "#" if ascii_only else "▓"
+    return f"{dense} {count} changes in this column"
+
+
+def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
+    """The column whose tick interval contains ``cursor``.
+
+    Found by searching the column edges rather than inverting the formula that
+    produced them: the inverse truncates a second time and lands one column
+    early, which puts the cursor beside a transition boundary while the value
+    readout, which is exact, already reports the value from the other side of
+    it. The edges are cached, so the search costs nothing per frame.
+    """
+    edges = _column_edge_tuple(start, end, width)
+    if not edges or width <= 1:
         return 0
-    # A column's tick is floor(span * column / (width - 1)), and for an integer
-    # cursor that is >= cursor exactly when span * column / (width - 1) is, so
-    # the first such column is the ceiling of the ratio. Computed as a ceiling
-    # division to stay in integers.
-    span, last = end - start, width - 1
-    offset = min(max(0, cursor - start), span)
-    return min(last, -((-offset * last) // span))
+    # Zoomed in past one tick per column, several columns share a tick and the
+    # ones before it are empty. The cursor belongs to the first of them, so that
+    # a tick occupies the whole run it is drawn across rather than only its last
+    # column; a tick strictly inside an interval belongs to the column before.
+    column = bisect_left(edges, cursor)
+    if column >= len(edges) or edges[column] != cursor:
+        column -= 1
+    return min(width - 1, max(0, column))
 
 
 def cursor_track_glyph(track: str, column: int) -> str:
@@ -1794,6 +1903,9 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "  g                   goto exact tick or physical time",
         "  < / >   + / -       pan / zoom viewport",
         "  n/N  e/E  r/R  f/F transition / edge / rising / falling",
+        "Reading the waveform",
+        "  ▓ (# in --ascii)     column holds several changes; zoom in to resolve",
+        "  │                   a bus changes value in this column",
         "Inspect",
         "  i                   before/after inspector",
         "  m / M               place marker A / B",
@@ -2128,6 +2240,19 @@ def _draw_tui(
     divider2_x = meta_x + meta_width
     wave_x = divider2_x + 2
     wave_width = max(8, width - wave_x - 1)
+
+    focused = _wave_focused_signal_index(state)
+    if focused is not None:
+        density = column_density_note(
+            all_signals[focused],
+            state.cursor,
+            state.view_start,
+            state.view_end,
+            wave_width,
+            ascii_only=ascii_only,
+        )
+        if density:
+            _safe_addstr(stdscr, 0, len(title) + 2, density, attrs["dim"])
 
     marker_height = 5 if state.marker_a is not None or state.marker_b is not None else 0
     panel_budget = max(0, height - 10)
