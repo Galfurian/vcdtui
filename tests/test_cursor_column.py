@@ -25,41 +25,44 @@ VIEWPORTS = [
 
 
 class CursorColumnTests(unittest.TestCase):
-    def test_the_column_never_starts_after_the_cursor(self):
+    def test_the_cursor_is_drawn_in_the_column_that_owns_its_tick(self):
+        # The ownership invariant itself lives in test_tick_run_alignment; this
+        # checks it holds across the viewports that exercised the old bug.
         for start, end, width in VIEWPORTS:
-            edges = vcdtui._column_edges(start, end, width)
+            edges = tuple(vcdtui._column_edges(start, end, width))
             for tick in range(start, end + 1):
                 column = vcdtui._cursor_column(tick, start, end, width)
+                low, high = vcdtui._column_span(edges, column, end)
                 with self.subTest(view=(start, end, width), tick=tick):
-                    self.assertLessEqual(edges[column], tick)
-
-    def test_the_cursor_is_before_the_next_distinct_edge(self):
-        # Together with the previous test this pins the cursor to the column run
-        # its tick is drawn across: never behind it, never past it.
-        for start, end, width in VIEWPORTS:
-            edges = vcdtui._column_edges(start, end, width)
-            for tick in range(start, end + 1):
-                column = vcdtui._cursor_column(tick, start, end, width)
-                following = next(
-                    (edge for edge in edges[column + 1 :] if edge > edges[column]),
-                    end + 1,
-                )
-                with self.subTest(view=(start, end, width), tick=tick):
-                    self.assertTrue(tick < following or column == width - 1)
+                    self.assertTrue(low <= tick < high)
 
     def test_a_tick_occupies_the_whole_run_of_columns_it_is_drawn_across(self):
-        # Zoomed in past one tick per column, a tick spans several columns; the
-        # cursor belongs at the left edge of that run, not its last column.
+        # Zoomed in past one tick per column, a tick spans several columns and
+        # the cursor sits at the left edge of that run, where its value starts.
         self.assertEqual(vcdtui._cursor_column(0, 0, 5, 30), 0)
         self.assertEqual(vcdtui._cursor_column(1, 0, 5, 30), 6)
 
-    def test_the_viewport_edges_map_to_the_edge_columns(self):
+    def test_the_viewport_start_maps_to_the_first_column(self):
         for start, end, width in VIEWPORTS:
             with self.subTest(view=(start, end, width)):
                 self.assertEqual(vcdtui._cursor_column(start, start, end, width), 0)
-                self.assertEqual(
-                    vcdtui._cursor_column(end, start, end, width), width - 1
-                )
+
+    def test_the_viewport_end_maps_to_the_last_column_that_owns_a_tick(self):
+        # With at least one column per tick that is the last column. Zoomed in
+        # further, the final tick shares a run and the cursor sits at its start.
+        for start, end, width in VIEWPORTS:
+            column = vcdtui._cursor_column(end, start, end, width)
+            edges = tuple(vcdtui._column_edges(start, end, width))
+            owners = [
+                candidate
+                for candidate in range(width)
+                if vcdtui._column_span(edges, candidate, end)[1]
+                > vcdtui._column_span(edges, candidate, end)[0]
+            ]
+            with self.subTest(view=(start, end, width)):
+                self.assertEqual(column, owners[-1])
+                if end - start >= width:
+                    self.assertEqual(column, width - 1)
 
     def test_a_tick_outside_the_viewport_is_clamped(self):
         self.assertEqual(vcdtui._cursor_column(-5, 0, 40, 30), 0)

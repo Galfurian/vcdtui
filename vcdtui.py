@@ -1314,11 +1314,51 @@ def _column_edges(start: int, end: int, width: int) -> List[int]:
     return list(_column_edge_tuple(start, end, width))
 
 
+@lru_cache(maxsize=64)
+def _column_layout(
+    start: int, end: int, width: int
+) -> Tuple[Tuple[Tuple[int, int], ...], Tuple[int, ...], Tuple[int, ...]]:
+    """Which ticks each column owns, and which column owns each tick.
+
+    Built once per viewport rather than derived per call, because the two have to
+    agree exactly and deriving them separately is what put the cursor a few
+    characters away from the transition it was reporting. Returns the per-column
+    tick spans, the sorted lows of the columns that own anything, and the columns
+    they belong to.
+
+    Zoomed in past one tick per column a tick is drawn across a run of columns.
+    The first column of the run owns it and the rest own nothing, so the value
+    starts where the tick starts. The final run also owns the viewport's last
+    tick, which has no edge of its own to sit on.
+    """
+    edges = _column_edge_tuple(start, end, width)
+    if not edges:
+        return (), (), ()
+    spans: List[Tuple[int, int]] = []
+    owner_lows: List[int] = []
+    owner_columns: List[int] = []
+    column = 0
+    while column < width:
+        low = edges[column]
+        run_end = column
+        while run_end + 1 < width and edges[run_end + 1] == low:
+            run_end += 1
+        following = edges[run_end + 1] if run_end + 1 <= width else end + 1
+        spans.append((low, following))
+        owner_lows.append(low)
+        owner_columns.append(column)
+        spans.extend([(low, low)] * (run_end - column))
+        column = run_end + 1
+    # The viewport's final tick sits past the last edge, so the last owner keeps it.
+    last = owner_columns[-1]
+    spans[last] = (spans[last][0], max(spans[last][1], end + 1))
+    return tuple(spans), tuple(owner_lows), tuple(owner_columns)
+
+
 def _column_span(edges: Sequence[int], column: int, end: int) -> Tuple[int, int]:
-    """The half-open tick range a column covers; the last one closes on ``end``."""
-    low = edges[column]
-    high = edges[column + 1] if column + 1 < len(edges) - 1 else end + 1
-    return low, max(high, low)
+    """The half-open tick range ``column`` owns, or an empty range if none."""
+    spans, _, _ = _column_layout(edges[0], end, len(edges) - 1)
+    return spans[column] if 0 <= column < len(spans) else (end, end)
 
 
 def changes_in_column(
@@ -1407,16 +1447,9 @@ def render_scalar_track(
     for column in range(width):
         low, stop = _column_span(edges, column, end)
         first, last = _change_range(signal.stream, low, stop, start)
-        if stop > low:
-            leaving = signal.stream.value_at(stop - 1)
-        else:
-            # Zoomed in past one tick per column, some columns cover no ticks at
-            # all. One sitting on a change tick must not show the new level: the
-            # change belongs to the column that actually contains the tick, and
-            # this one belongs to the run it sits in.
-            leaving = signal.stream.value_before(low)
-            if leaving is None:
-                leaving = signal.stream.value_at(low)
+        # A column owning no ticks is a later column of a tick's run, so it
+        # follows the owner that already drew the change: the value at its edge.
+        leaving = signal.stream.value_at(max(low, stop - 1))
         if last - first >= 2:
             output.append(dense)
             continue
@@ -1522,25 +1555,16 @@ def column_density_note(
 
 
 def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
-    """The column whose tick interval contains ``cursor``.
+    """The column that owns ``cursor``.
 
-    Found by searching the column edges rather than inverting the formula that
-    produced them: the inverse truncates a second time and lands one column
-    early, which puts the cursor beside a transition boundary while the value
-    readout, which is exact, already reports the value from the other side of
-    it. The edges are cached, so the search costs nothing per frame.
+    Read off the same layout the tracks are drawn from, so the cursor cannot
+    disagree with the transition boundaries, the markers or the ruler grid.
     """
-    edges = _column_edge_tuple(start, end, width)
-    if not edges or width <= 1:
+    _, owner_lows, owner_columns = _column_layout(start, end, width)
+    if not owner_lows:
         return 0
-    # Zoomed in past one tick per column, several columns share a tick and the
-    # ones before it are empty. The cursor belongs to the first of them, so that
-    # a tick occupies the whole run it is drawn across rather than only its last
-    # column; a tick strictly inside an interval belongs to the column before.
-    column = bisect_left(edges, cursor)
-    if column >= len(edges) or edges[column] != cursor:
-        column -= 1
-    return min(width - 1, max(0, column))
+    index = min(max(0, bisect_right(owner_lows, cursor) - 1), len(owner_columns) - 1)
+    return owner_columns[index]
 
 
 def cursor_track_glyph(track: str, column: int) -> str:
