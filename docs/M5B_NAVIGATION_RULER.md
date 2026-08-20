@@ -23,6 +23,20 @@ Labels may be omitted when they would overlap, but tick locations are still rend
 
 Marker A/B and the cursor overlay the ruler. The marker table remains authoritative when multiple exact ticks quantize to the same terminal column.
 
+A column shows exactly one tick, chosen by `_sample_ticks`, and a tick is drawn
+in the first column whose tick is at or after it. `_cursor_column` is that rule
+in closed form, so the cursor, the markers, the ruler ticks and the transition
+boundaries in a bus track all quantize the same way. Deriving the column with
+the inverse of the sampling formula instead truncates a second time and lands
+one column early, which puts the cursor beside a bus boundary while the exact
+value readout already reports the value from the other side of it.
+
+Quantization only ever rounds a tick forward, never back, so the column under
+the cursor is never behind the value it reports. The value column and the
+before/after inspector are exact at the cursor tick and remain authoritative:
+zoomed out, a column covers many ticks and a change narrower than one column is
+not drawn at all.
+
 ## Range boundaries
 
 The following keys move the exact cursor to the active range boundaries:
