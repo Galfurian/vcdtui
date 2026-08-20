@@ -23,14 +23,18 @@ Labels may be omitted when they would overlap, but tick locations are still rend
 
 Marker A/B and the cursor overlay the ruler. The marker table remains authoritative when multiple exact ticks quantize to the same terminal column.
 
-A column is a half-open interval of ticks, `[edges[c], edges[c+1])`, given by
-`_column_edges`; the last column closes inclusively so the final tick is drawn.
-`_cursor_column` searches those edges rather than inverting the formula that
-produced them, so the cursor, the markers, the ruler ticks and the transition
-boundaries in a bus track all quantize the same way by construction instead of
-by proof. Zoomed in past one tick per column a tick spans a run of columns, and
-the cursor sits at the left edge of that run, where the boundary for that tick
-is also drawn.
+A column owns a half-open range of ticks. `_column_layout` builds the whole
+mapping for a viewport at once - which ticks each column owns, and which column
+owns each tick - and both the renderers and `_cursor_column` read it. Deriving
+the two separately is what put the cursor a few characters away from the
+transition it was reporting: they have to agree exactly, so they come from one
+table.
+
+Zoomed in past one tick per column, a tick is drawn across a run of columns. The
+first column of the run owns it and the rest own nothing, so the value starts
+where the tick starts and the cursor lands on the transition rather than at the
+far end of it. The final run also owns the viewport's last tick, which has no
+edge of its own to sit on.
 
 The column under the cursor never starts after the cursor's tick and never ends
 before it, so the drawing and the exact value readout cannot disagree about

@@ -397,6 +397,12 @@ summarises everything recorded inside its own:
 2 or more    ▓ (# under --ascii): too dense to resolve, with a count in the title
 ```
 
+`_column_layout` builds the tick-to-column mapping for a viewport once, and both
+the renderers and the cursor read it, so they cannot disagree about which column
+a transition belongs to. Zoomed in past one tick per column, a tick is drawn
+across a run of columns and the first of them owns it, which is what puts the
+value's start and the cursor on the same character.
+
 Sampling one tick per column instead aliases, and aliasing in a waveform viewer
 is not a coarse picture but a false one. A clock toggling every 5 ticks, viewed
 at 20 ticks per column, was drawn as a flat line: 241 transitions reported as a

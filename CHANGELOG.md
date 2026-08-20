@@ -23,6 +23,13 @@
 - A bus label is drawn only when it fits its run. `0000` truncated to `0` reads
   as the value being zero, which is the same confident wrong answer as the flat
   clock.
+- Zoomed in past one tick per column, a tick is drawn across a run of columns.
+  The first column of the run now owns it, so the value starts where the tick
+  starts; previously the cursor sat at the run's left edge while the change was
+  drawn at its right edge, putting a bus boundary two or three characters after
+  the cursor that already reported the new value.
+- `_column_layout` builds the tick-to-column mapping once per viewport and both
+  the renderers and the cursor read it, so the two cannot drift apart again.
 - Retired `sample_waveform`, the point sampler: unused by the UI and now
   superseded.
 

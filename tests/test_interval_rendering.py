@@ -70,16 +70,10 @@ class CursorAgreesWithColumnsTests(unittest.TestCase):
             edges = vcdtui._column_edges(start, end, width)
             for tick in range(start, end + 1):
                 column = vcdtui._cursor_column(tick, start, end, width)
-                following = next(
-                    (edge for edge in edges[column + 1 :] if edge > edges[column]),
-                    end + 1,
-                )
+                low, high = vcdtui._column_span(tuple(edges), column, end)
                 with self.subTest(view=(start, end, width), tick=tick):
                     self.assertLessEqual(edges[column], tick)
-                    # The last column owns the final tick, so it closes
-                    # inclusively; zoomed in, repeated edges mean the next
-                    # boundary is the next distinct one.
-                    self.assertTrue(tick < following or column == width - 1)
+                    self.assertTrue(low <= tick < high)
 
 
 class DenseColumnTests(unittest.TestCase):
