@@ -1414,9 +1414,24 @@ def render_waveform_track(
 
 
 def _cursor_column(cursor: int, start: int, end: int, width: int) -> int:
+    """The column that shows ``cursor``, defined by how the tracks are sampled.
+
+    A column shows exactly one tick, picked by ``_sample_ticks``, so the cursor
+    belongs to the first column whose tick is at or after it. Deriving that with
+    the inverse formula truncates a second time and lands one column early: the
+    cursor then sits beside a transition boundary while the value readout, which
+    is exact, already reports the value from the other side of it. Searching the
+    sampled ticks cannot disagree with them.
+    """
     if width <= 1 or start == end:
         return 0
-    return min(width - 1, max(0, ((cursor - start) * (width - 1)) // (end - start)))
+    # A column's tick is floor(span * column / (width - 1)), and for an integer
+    # cursor that is >= cursor exactly when span * column / (width - 1) is, so
+    # the first such column is the ceiling of the ratio. Computed as a ceiling
+    # division to stay in integers.
+    span, last = end - start, width - 1
+    offset = min(max(0, cursor - start), span)
+    return min(last, -((-offset * last) // span))
 
 
 def cursor_track_glyph(track: str, column: int) -> str:
