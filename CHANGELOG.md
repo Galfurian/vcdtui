@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Waveform rendering
+
+- A waveform column is now an interval of ticks that summarises everything
+  recorded inside it, rather than a single sampled tick. Point sampling aliased,
+  and aliasing here is not a coarse picture but a false one: a clock toggling
+  every 5 ticks, viewed at 20 ticks per column, was drawn as a flat line - 241
+  transitions reported as a signal that never moved. At 2 ticks per column the
+  same clock was drawn with its duty cycle appearing to change halfway across
+  the screen.
+- A column holding two or more changes is drawn `▓` (`#` under `--ascii`) and
+  the title line reports how many it is hiding, so the glyph means "zoom in"
+  rather than "something". A change narrower than one column is now visible
+  instead of being stepped over.
+- The cursor column is found by searching the column edges instead of inverting
+  the formula that produced them, so the cursor, the markers, the ruler grid and
+  the bus boundaries quantize the same way by construction. Zoomed in past one
+  tick per column, a tick spans a run of columns and the cursor sits at its left
+  edge.
+- A bus label is drawn only when it fits its run. `0000` truncated to `0` reads
+  as the value being zero, which is the same confident wrong answer as the flat
+  clock.
+- Retired `sample_waveform`, the point sampler: unused by the UI and now
+  superseded.
+
 ## 0.3.0
 
 Selecting signals in a testbench that instantiates the same module twice took

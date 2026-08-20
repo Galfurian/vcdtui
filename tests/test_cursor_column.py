@@ -25,27 +25,33 @@ VIEWPORTS = [
 
 
 class CursorColumnTests(unittest.TestCase):
-    def test_a_columns_own_tick_maps_back_to_that_column(self):
+    def test_the_column_never_starts_after_the_cursor(self):
         for start, end, width in VIEWPORTS:
-            ticks = vcdtui._sample_ticks(start, end, width)
-            for column, tick in enumerate(ticks):
-                # Zoomed in, several columns share one tick; the first of them
-                # is the one that owns it, which is where a bus boundary goes.
-                expected = ticks.index(tick)
-                with self.subTest(view=(start, end, width), column=column):
-                    self.assertEqual(
-                        vcdtui._cursor_column(tick, start, end, width), expected
-                    )
-
-    def test_the_column_shows_the_tick_the_cursor_is_on_or_the_next_one(self):
-        # Never an earlier tick: that is what made the cursor sit left of the
-        # boundary while already reporting the new value.
-        for start, end, width in VIEWPORTS:
-            ticks = vcdtui._sample_ticks(start, end, width)
+            edges = vcdtui._column_edges(start, end, width)
             for tick in range(start, end + 1):
                 column = vcdtui._cursor_column(tick, start, end, width)
                 with self.subTest(view=(start, end, width), tick=tick):
-                    self.assertGreaterEqual(ticks[column], tick)
+                    self.assertLessEqual(edges[column], tick)
+
+    def test_the_cursor_is_before_the_next_distinct_edge(self):
+        # Together with the previous test this pins the cursor to the column run
+        # its tick is drawn across: never behind it, never past it.
+        for start, end, width in VIEWPORTS:
+            edges = vcdtui._column_edges(start, end, width)
+            for tick in range(start, end + 1):
+                column = vcdtui._cursor_column(tick, start, end, width)
+                following = next(
+                    (edge for edge in edges[column + 1 :] if edge > edges[column]),
+                    end + 1,
+                )
+                with self.subTest(view=(start, end, width), tick=tick):
+                    self.assertTrue(tick < following or column == width - 1)
+
+    def test_a_tick_occupies_the_whole_run_of_columns_it_is_drawn_across(self):
+        # Zoomed in past one tick per column, a tick spans several columns; the
+        # cursor belongs at the left edge of that run, not its last column.
+        self.assertEqual(vcdtui._cursor_column(0, 0, 5, 30), 0)
+        self.assertEqual(vcdtui._cursor_column(1, 0, 5, 30), 6)
 
     def test_the_viewport_edges_map_to_the_edge_columns(self):
         for start, end, width in VIEWPORTS:
@@ -93,16 +99,15 @@ b11 !
 
     def test_the_column_and_the_value_readout_agree_across_the_transition(self):
         start, end, width = 0, 40, 30
-        ticks = vcdtui._sample_ticks(start, end, width)
+        edges = vcdtui._column_edges(start, end, width)
         for tick in range(start, end + 1):
             column = vcdtui._cursor_column(tick, start, end, width)
-            exact = self.signal.stream.value_at(tick)
-            sampled = self.signal.stream.value_at(ticks[column])
             with self.subTest(tick=tick):
-                # The sampled tick is at or after the cursor, so the column may
-                # be ahead of the readout but must never lag behind it.
-                if exact == "0011":
-                    self.assertEqual(sampled, "0011")
+                # The column the cursor sits in starts at or before its tick, so
+                # the value the column was drawn from is never from after it.
+                self.assertLessEqual(edges[column], tick)
+                if self.signal.stream.value_at(tick) == "0000":
+                    self.assertEqual(self.signal.stream.value_at(edges[column]), "0000")
 
 
 if __name__ == "__main__":

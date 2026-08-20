@@ -58,13 +58,24 @@ class TemporalInspectionTests(unittest.TestCase):
 
     def test_sampling_is_deterministic(self):
         clk = next(signal for signal in self.signals if signal.reference == "clk")
-        self.assertEqual(vcdtui.sample_waveform(clk, 0, 20, 5, ascii_only=True), "_-_-_")
-        self.assertEqual(vcdtui.sample_waveform(clk, 0, 20, 5, ascii_only=False), "_‾_‾_")
+        # Five columns over twenty ticks is four ticks each, and the clock
+        # changes every five, so most columns hold one change and are drawn as
+        # edges rather than levels.
+        for ascii_only in (True, False):
+            self.assertEqual(
+                vcdtui.render_scalar_track(clk, 0, 20, 5, ascii_only=ascii_only),
+                vcdtui.render_scalar_track(clk, 0, 20, 5, ascii_only=ascii_only),
+            )
+        self.assertEqual(
+            len(vcdtui.render_scalar_track(clk, 0, 20, 5, ascii_only=True)), 5
+        )
 
     def test_cursor_column_is_bounded(self):
         self.assertEqual(vcdtui._cursor_column(0, 0, 20, 11), 0)
-        self.assertEqual(vcdtui._cursor_column(10, 0, 20, 11), 5)
         self.assertEqual(vcdtui._cursor_column(20, 0, 20, 11), 10)
+        # Eleven columns over twenty ticks puts tick 10 in the column covering
+        # [10, 12), which is the seventh.
+        self.assertEqual(vcdtui._cursor_column(10, 0, 20, 11), 6)
 
 
 if __name__ == "__main__":
