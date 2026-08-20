@@ -1,37 +1,50 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+A waveform column showed the value at one sampled tick, so the picture could be
+confidently wrong and nothing in it said so. A clock toggling every 5 ticks,
+viewed at 20 ticks per column, was drawn as a flat line: 241 transitions
+reported as a signal that never moved. At 2 ticks per column the same clock came
+out with its duty cycle appearing to change halfway across the screen. This
+release is about a column meaning what it draws.
 
 ### Waveform rendering
 
-- A waveform column is now an interval of ticks that summarises everything
-  recorded inside it, rather than a single sampled tick. Point sampling aliased,
-  and aliasing here is not a coarse picture but a false one: a clock toggling
-  every 5 ticks, viewed at 20 ticks per column, was drawn as a flat line - 241
-  transitions reported as a signal that never moved. At 2 ticks per column the
-  same clock was drawn with its duty cycle appearing to change halfway across
-  the screen.
-- A column holding two or more changes is drawn `▓` (`#` under `--ascii`) and
-  the title line reports how many it is hiding, so the glyph means "zoom in"
-  rather than "something". A change narrower than one column is now visible
-  instead of being stepped over.
-- The cursor column is found by searching the column edges instead of inverting
-  the formula that produced them, so the cursor, the markers, the ruler grid and
-  the bus boundaries quantize the same way by construction. Zoomed in past one
-  tick per column, a tick spans a run of columns and the cursor sits at its left
-  edge.
+- A column is now the range of ticks it covers and summarises everything
+  recorded inside it: the held level, the single transition, or `▓` (`#` under
+  `--ascii`) when there is more than one change and no way to draw them. The
+  title line reports how many the column is hiding, so the glyph says "zoom in"
+  rather than "something".
+- A change narrower than one column is visible instead of being stepped over,
+  and edges are counted rather than inferred from two samples.
+- The cursor is drawn in the column that owns its tick. It used to be derived by
+  inverting the sampling formula, which truncated a second time and landed one
+  column early for essentially every column of every viewport, so at a
+  transition the exact value readout reported the new value while the cursor was
+  still drawn beside the boundary. The ruler grid and the markers were displaced
+  by the same column.
+- Zoomed in past one tick per column, a tick is drawn across a run of columns
+  and the first of them owns it, so the value starts where the tick starts.
+  `_column_layout` builds the whole tick-to-column mapping for a viewport once
+  and the renderers and the cursor both read it, rather than deriving it twice
+  and requiring the two to be proved equal.
 - A bus label is drawn only when it fits its run. `0000` truncated to `0` reads
-  as the value being zero, which is the same confident wrong answer as the flat
-  clock.
-- Zoomed in past one tick per column, a tick is drawn across a run of columns.
-  The first column of the run now owns it, so the value starts where the tick
-  starts; previously the cursor sat at the run's left edge while the change was
-  drawn at its right edge, putting a bus boundary two or three characters after
-  the cursor that already reported the new value.
-- `_column_layout` builds the tick-to-column mapping once per viewport and both
-  the renderers and the cursor read it, so the two cannot drift apart again.
-- Retired `sample_waveform`, the point sampler: unused by the UI and now
-  superseded.
+  as the value being zero, which is the same kind of confident wrong answer as
+  the flat clock.
+- Retired `sample_waveform`, the point sampler: unused by the interface and
+  superseded here.
+
+### Qualification
+
+- `tests/test_tui_draw_smoke.py` draws a whole frame into a recording stub, so
+  the wiring between the pure helpers and `_draw_tui` is covered rather than
+  assumed. It is what caught two of the rendering defects above.
+- The Icarus Verilog job truncates its trace after the header instead of at a
+  fixed byte count, which 0.3.0's larger simulated design had pushed into the
+  middle of the header; a truncated header is a genuine parse error rather than
+  a recoverable trace, so the job failed on a correct refusal.
+- 293 tests, up from 247.
 
 ## 0.3.0
 
