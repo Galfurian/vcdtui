@@ -29,6 +29,8 @@ from typing import (
 __version__ = "0.4.0"
 
 MINIMUM_PYTHON = (3, 10)
+DEFAULT_WAVE_WIDTH = 80
+MINIMUM_WAVE_WIDTH = 32
 
 
 def python_version_error(version: Sequence[int]) -> Optional[str]:
@@ -692,6 +694,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from", dest="time_from", metavar="TIME", help="start time")
     parser.add_argument("--to", dest="time_to", metavar="TIME", help="end time")
     parser.add_argument("--dump", action="store_true", help="render a deterministic timeline to stdout")
+    parser.add_argument(
+        "--dump-wave",
+        action="store_true",
+        help="render selected signals as a static waveform to stdout",
+    )
+    parser.add_argument(
+        "--wave-width",
+        type=int,
+        default=DEFAULT_WAVE_WIDTH,
+        metavar="COLUMNS",
+        help=f"total width for --dump-wave (default: {DEFAULT_WAVE_WIDTH})",
+    )
     parser.add_argument("--ascii", action="store_true", help="use ASCII drawing characters")
     parser.add_argument("--no-color", action="store_true", help="disable terminal colors")
     return parser
@@ -1871,6 +1885,55 @@ def render_timeline_ruler(
     return "".join(labels), "".join(rule)
 
 
+def render_wave_dump(
+    vcd: VCDFile,
+    signals: Sequence[Signal],
+    start: int,
+    end: int,
+    *,
+    width: int = DEFAULT_WAVE_WIDTH,
+    ascii_only: bool,
+) -> str:
+    """Render selected signals as a deterministic, fixed-width waveform.
+
+    ``width`` is the maximum width of the complete output line, including the
+    signal-name column. Vector values use the binary representation already
+    stored by the VCD parser; callers can request a wider or narrower view
+    without making the output depend on the terminal size.
+    """
+    if width < MINIMUM_WAVE_WIDTH:
+        raise VCDTUIError(
+            f"--wave-width must be at least {MINIMUM_WAVE_WIDTH} columns"
+        )
+    if not signals:
+        raise VCDTUIError("cannot render a waveform without signals")
+
+    separator = "  "
+    longest_name = max(len(signal.display_name) for signal in signals)
+    name_width = min(longest_name, min(24, max(8, width // 3)))
+    wave_width = width - name_width - len(separator)
+
+    labels, rule = render_timeline_ruler(
+        vcd.timescale, start, end, wave_width, ascii_only=ascii_only
+    )
+    prefix = " " * (name_width + len(separator))
+    output = [(prefix + labels).rstrip(), prefix + rule]
+
+    for signal in signals:
+        name = _clip_middle(signal.display_name, name_width, ascii_only=ascii_only)
+        track = render_waveform_track(
+            signal,
+            start,
+            end,
+            wave_width,
+            ascii_only=ascii_only,
+            display_format="binary",
+        )
+        output.append(f"{name:<{name_width}}{separator}{track}")
+
+    return "\n".join(line[:width] for line in output) + "\n"
+
+
 # Ctrl+A arrives as the raw control code, not as a named curses key.
 _CTRL_A = 1
 
@@ -2796,6 +2859,23 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         print(f"vcdtui: warning: {warning}", file=sys.stderr)
     start, end = resolve_range(vcd, args.time_from, args.time_to)
 
+    if args.dump and args.dump_wave:
+        raise VCDTUIError("--dump and --dump-wave are mutually exclusive")
+
+    if args.dump_wave:
+        print(
+            render_wave_dump(
+                vcd,
+                signals,
+                start,
+                end,
+                width=args.wave_width,
+                ascii_only=args.ascii,
+            ),
+            end="",
+        )
+        return 0
+
     if args.dump:
         print(
             render_dump(
@@ -2811,7 +2891,9 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        raise VCDTUIError("interactive mode requires a terminal; use --dump for non-interactive output")
+        raise VCDTUIError(
+            "interactive mode requires a terminal; use --dump or --dump-wave for non-interactive output"
+        )
     run_tui(
         vcd,
         signals,
