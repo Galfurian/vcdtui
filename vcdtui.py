@@ -229,6 +229,7 @@ class TUIState:
     wave_offset: int = 0
     expanded_scopes: Set[Tuple[str, ...]] = field(default_factory=set)
     show_inspector: bool = False
+    show_signal_tree: bool = True
     marker_a: Optional[int] = None
     marker_b: Optional[int] = None
     display_formats: List[str] = field(default_factory=list)
@@ -1914,6 +1915,7 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "vcdtui controls",
         "Signals",
         "  Tab                 switch signal-tree / waveform focus",
+        "  s                   show/hide the signal-selection pane",
         "  Up/Down, j/k        move within the focused pane",
         "  Enter               expand / collapse the focused scope",
         "  Space               show/hide the focused signal, or a whole scope",
@@ -2252,15 +2254,22 @@ def _draw_tui(
         return
 
     tree_items = build_tree_items(all_signals, state.expanded_scopes)
-    longest_tree_line = max(
-        [len("signals"), *(len(_tree_item_text(item, state, ascii_only=ascii_only)) for item in tree_items)],
-        default=len("signals"),
-    )
-    tree_cap = min(48, max(20, width // 3))
-    tree_width = max(14, min(tree_cap, longest_tree_line + 1))
     meta_width = min(28, max(18, width // 5))
-    divider1_x = tree_width
-    meta_x = divider1_x + 2
+    divider1_x: Optional[int]
+    if state.show_signal_tree:
+        longest_tree_line = max(
+            [len("signals"), *(len(_tree_item_text(item, state, ascii_only=ascii_only)) for item in tree_items)],
+            default=len("signals"),
+        )
+        tree_cap = min(48, max(20, width // 3))
+        tree_width = max(14, min(tree_cap, longest_tree_line + 1))
+        divider1_x = tree_width
+        meta_x = divider1_x + 2
+    else:
+        divider1_x = None
+        meta_x = 0
+        if state.focus_pane == "tree":
+            state.focus_pane = "wave"
     divider2_x = meta_x + meta_width
     wave_x = divider2_x + 2
     wave_width = max(8, width - wave_x - 1)
@@ -2290,12 +2299,13 @@ def _draw_tui(
     content_row = 4
     main_capacity = max(1, main_bottom - content_row + 1)
 
-    state.tree_focus, state.tree_offset = _ensure_offset(
-        state.tree_focus,
-        state.tree_offset,
-        main_capacity,
-        len(tree_items),
-    )
+    if state.show_signal_tree:
+        state.tree_focus, state.tree_offset = _ensure_offset(
+            state.tree_focus,
+            state.tree_offset,
+            main_capacity,
+            len(tree_items),
+        )
 
     visible_indexes = _visible_signal_indexes(state)
     state.wave_focus, state.wave_offset = _ensure_offset(
@@ -2314,27 +2324,30 @@ def _draw_tui(
         attrs,
         ascii_only=ascii_only,
     )
-    _safe_addstr(stdscr, header_row, 0, "signals", curses.A_BOLD)
+    if state.show_signal_tree:
+        _safe_addstr(stdscr, header_row, 0, "signals", curses.A_BOLD)
     _safe_addstr(stdscr, header_row, meta_x, "shown @cursor", curses.A_BOLD)
     _safe_addstr(stdscr, header_row, wave_x, "waveform", curses.A_BOLD)
 
     divider = "|" if ascii_only else "│"
     for row in range(header_row, main_bottom + 1):
-        _safe_addstr(stdscr, row, divider1_x, divider, attrs["dim"])
+        if divider1_x is not None:
+            _safe_addstr(stdscr, row, divider1_x, divider, attrs["dim"])
         _safe_addstr(stdscr, row, divider2_x, divider, attrs["dim"])
 
-    tree_end = min(len(tree_items), state.tree_offset + main_capacity)
-    for row, item_index in enumerate(range(state.tree_offset, tree_end), start=content_row):
-        item = tree_items[item_index]
-        text = _clip_end(
-            _tree_item_text(item, state, ascii_only=ascii_only),
-            tree_width,
-            ascii_only=ascii_only,
-        )
-        attr = attrs["scope"] if item.kind == "scope" else 0
-        if state.focus_pane == "tree" and item_index == state.tree_focus:
-            attr |= attrs["focus"]
-        _safe_addstr(stdscr, row, 0, text, attr)
+    if state.show_signal_tree:
+        tree_end = min(len(tree_items), state.tree_offset + main_capacity)
+        for row, item_index in enumerate(range(state.tree_offset, tree_end), start=content_row):
+            item = tree_items[item_index]
+            text = _clip_end(
+                _tree_item_text(item, state, ascii_only=ascii_only),
+                tree_width,
+                ascii_only=ascii_only,
+            )
+            attr = attrs["scope"] if item.kind == "scope" else 0
+            if state.focus_pane == "tree" and item_index == state.tree_focus:
+                attr |= attrs["focus"]
+            _safe_addstr(stdscr, row, 0, text, attr)
 
     wave_end = min(len(visible_indexes), state.wave_offset + main_capacity)
     shown_indexes = visible_indexes[state.wave_offset:wave_end]
@@ -2448,6 +2461,18 @@ def _draw_tui(
     stdscr.refresh()
 
 
+def _toggle_signal_tree(state: TUIState) -> None:
+    """Show or hide the signal-selection tree and keep focus on a visible pane."""
+    state.show_signal_tree = not state.show_signal_tree
+    if not state.show_signal_tree:
+        state.focus_pane = "wave"
+    state.status = (
+        "signal-selection pane shown"
+        if state.show_signal_tree
+        else "signal-selection pane hidden"
+    )
+
+
 def _move_to_time(
     state: TUIState,
     tick: int,
@@ -2541,7 +2566,13 @@ def run_tui(
             if _is_help_key(curses, key):
                 _show_help(stdscr, ascii_only=ascii_only)
                 continue
+            if key in (ord("s"), ord("S")):
+                _toggle_signal_tree(state)
+                continue
             if key == ord("\t"):
+                if not state.show_signal_tree:
+                    state.status = "signal-selection pane hidden; press s to show it"
+                    continue
                 state.focus_pane = "tree" if state.focus_pane == "wave" else "wave"
                 continue
 
