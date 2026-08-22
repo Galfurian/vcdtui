@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0
+
+This release makes the waveform easier to focus on in the TUI and reusable as
+plain terminal output outside it.
+
+### Waveform output
+
+- Add `--dump-wave` to render selected signals as a deterministic static
+  waveform on stdout using the same interval-aware waveform and ruler logic as
+  the TUI.
+- Add `--wave-width COLUMNS`; output defaults to 80 columns total, including
+  signal names, and remains independent of terminal width. Widths below 32
+  columns are rejected.
+- `--dump-wave` works with `--signals`, `--scope`, `--from`, `--to` and
+  `--ascii`; vector values use binary display by default.
+
+### Interactive view
+
+- Add `s` / `S` to hide or restore the signal-selection pane. Hiding it reclaims
+  the left-hand width for the value/waveform area and keeps focus on the visible
+  waveform pane.
+
 ## 0.4.0
 
 A waveform column showed the value at one sampled tick, so the picture could be
