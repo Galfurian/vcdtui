@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1
+
+This patch release makes the new signal navigation layout more useful on a
+real terminal: the default waveform height is now two rows, and two-row buses
+keep their exact cursor value aligned with the waveform instead of their
+historical labels.
+
+### TUI layout
+
+- Start interactive views with two-row tracks by default; `t` still returns to
+  the compact one-row view when more signals need to fit on screen.
+- Align the exact `shown @cursor` value with the waveform row for two-row buses,
+  keeping the per-run bus labels on their separate upper row.
+
 ## 0.7.0
 
 The one-row track is a dense summary, and a vector is a summary of its bits.

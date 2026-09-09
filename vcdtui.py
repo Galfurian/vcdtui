@@ -26,13 +26,14 @@ from typing import (
     Union,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 MINIMUM_PYTHON = (3, 10)
 DEFAULT_WAVE_WIDTH = 80
 MINIMUM_WAVE_WIDTH = 32
 MIN_TRACK_HEIGHT = 1
 MAX_TRACK_HEIGHT = 4
+DEFAULT_TRACK_HEIGHT = 2
 
 
 def adjust_track_height(height: int, delta: int) -> int:
@@ -257,7 +258,7 @@ class TUIState:
     expanded_signals: Set[int] = field(default_factory=set)
     shown_bits: Set[Tuple[int, int]] = field(default_factory=set)
     bit_signals: Dict[Tuple[int, int], Signal] = field(default_factory=dict)
-    track_height: int = MIN_TRACK_HEIGHT
+    track_height: int = DEFAULT_TRACK_HEIGHT
     show_inspector: bool = False
     show_signal_tree: bool = True
     marker_a: Optional[int] = None
@@ -1805,6 +1806,7 @@ def _place_bus_labels(
     signal: Signal,
     width: int,
     display_format: str,
+    skip_column: Optional[int] = None,
 ) -> None:
     """Centre each held value over its run, in place, when it fits entirely.
 
@@ -1812,6 +1814,8 @@ def _place_bus_labels(
     the value being 0, so a run too narrow for its label is left blank.
     """
     for run_start, run_end in _bus_runs(kinds, width):
+        if skip_column is not None and run_start <= skip_column < run_end:
+            continue
         room = run_end - run_start
         raw_value = signal.stream.value_at(edges[run_start]) or "?"
         label = format_signal_value(signal, raw_value, display_format)
@@ -1829,6 +1833,7 @@ def render_bus_track(
     *,
     ascii_only: bool,
     display_format: str = "binary",
+    show_labels: bool = True,
 ) -> str:
     """Draw a bus as held runs separated by the columns where it changes.
 
@@ -1845,9 +1850,10 @@ def render_bus_track(
         dense if kind == "dense" else boundary if kind == "boundary" else horizontal
         for kind in kinds
     ]
-    _place_bus_labels(
-        line, kinds, _column_edge_tuple(start, end, width), signal, width, display_format
-    )
+    if show_labels:
+        _place_bus_labels(
+            line, kinds, _column_edge_tuple(start, end, width), signal, width, display_format
+        )
     return "".join(line)
 
 
@@ -1860,6 +1866,7 @@ def render_bus_track_rows(
     ascii_only: bool,
     height: int = 1,
     display_format: str = "binary",
+    cursor_column: Optional[int] = None,
 ) -> List[str]:
     """Draw a bus across ``height`` rows.
 
@@ -1878,11 +1885,19 @@ def render_bus_track_rows(
     edges = _column_edge_tuple(start, end, width)
     if height == 2:
         labels = [" "] * width
-        _place_bus_labels(labels, kinds, edges, signal, width, display_format)
+        _place_bus_labels(
+            labels, kinds, edges, signal, width, display_format, cursor_column
+        )
         return [
             "".join(labels),
             render_bus_track(
-                signal, start, end, width, ascii_only=ascii_only, display_format=display_format
+                signal,
+                start,
+                end,
+                width,
+                ascii_only=ascii_only,
+                display_format=display_format,
+                show_labels=False,
             ),
         ]
     horizontal = "-" if ascii_only else "─"
@@ -1940,6 +1955,7 @@ def render_waveform_track_rows(
     ascii_only: bool,
     height: int = 1,
     display_format: str = "binary",
+    cursor_column: Optional[int] = None,
 ) -> List[str]:
     """The waveform for one signal as ``height`` rows of exactly ``width`` columns."""
     if signal.width == 1 and signal.stream.kind == "bit":
@@ -1954,6 +1970,7 @@ def render_waveform_track_rows(
         ascii_only=ascii_only,
         height=height,
         display_format=display_format,
+        cursor_column=cursor_column,
     )
 
 
@@ -2780,6 +2797,25 @@ def _draw_filter_box(stdscr, state: TUIState, width: int, attrs: Dict[str, int])
     _safe_addstr(stdscr, 2, 0, _clip_end(text, width, ascii_only=True), attrs["focus"] if state.filter_editing else attrs["dim"])
 
 
+def _filter_box_width(
+    all_signals: Sequence[Signal], state: TUIState, terminal_width: int
+) -> int:
+    """Width available before the waveform starts, including the value pane."""
+    items = filtered_tree_items(
+        all_signals, state.expanded_scopes, state.expanded_signals, state.filter_pattern
+    )
+    longest = max(
+        [len("signals"), *(
+            len(_tree_item_text(item, state, ascii_only=False)) for item in items
+        )],
+        default=len("signals"),
+    )
+    tree_cap = min(48, max(20, terminal_width // 3))
+    tree_width = max(14, min(tree_cap, longest + 1))
+    meta_width = min(28, max(18, terminal_width // 5))
+    return min(terminal_width - 1, tree_width + 2 + meta_width + 2)
+
+
 def _prompt_filter(stdscr, current: str, width: int) -> Tuple[Optional[str], str]:
     import curses
 
@@ -2991,7 +3027,7 @@ def _draw_tui(
         ascii_only=ascii_only,
     )
     if state.show_signal_tree:
-        _draw_filter_box(stdscr, state, divider1_x or 0, attrs)
+        _draw_filter_box(stdscr, state, wave_x - 1, attrs)
     if state.show_signal_tree:
         _safe_addstr(stdscr, header_row, 0, "signals", curses.A_BOLD)
     _safe_addstr(stdscr, header_row, meta_x, "shown @cursor", curses.A_BOLD)
@@ -3023,10 +3059,16 @@ def _draw_tui(
 
     if not rows:
         _safe_addstr(stdscr, content_row, meta_x, "no signals selected", attrs["dim"])
-    meta_line = (state.track_height - 1) // 2
     for position, wave_row in enumerate(shown_rows, start=state.wave_offset):
         row = content_row + (position - state.wave_offset) * rows_per_track
         signal = wave_row.signal
+        # Two-row buses put their historical labels on the top row and their
+        # waveform on the bottom one; align the exact cursor value with the
+        # waveform, not the labels. Scalar tracks keep their normal alignment.
+        meta_line = (
+            1 if state.track_height == 2 and signal.width > 1
+            else (state.track_height - 1) // 2
+        )
         raw_value = signal.stream.value_at(state.cursor) or "?"
         display_format = wave_row_format(wave_row, state)
         value = format_signal_value(signal, raw_value, display_format)
@@ -3050,6 +3092,16 @@ def _draw_tui(
             ascii_only=ascii_only,
             height=state.track_height,
             display_format=display_format,
+            cursor_column=(
+                _cursor_column(
+                    state.cursor,
+                    state.view_start,
+                    state.view_end,
+                    wave_width,
+                )
+                if state.view_start <= state.cursor <= state.view_end
+                else None
+            ),
         )
         track_attr = attrs["vector"] if signal.width > 1 else attrs["scalar"]
         if "x" in raw_value or "z" in raw_value:
@@ -3303,7 +3355,7 @@ def run_tui(
                 pattern, message = _prompt_filter(
                     stdscr,
                     state.filter_pattern,
-                    min(48, max(20, stdscr.getmaxyx()[1] // 3))
+                    _filter_box_width(all_signals, state, stdscr.getmaxyx()[1])
                     if state.show_signal_tree else 0,
                 ) if state.show_signal_tree else (None, "show the signal pane before editing its filter")
                 state.filter_editing = False

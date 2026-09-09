@@ -15,6 +15,10 @@ from tests.test_tui_draw_smoke import RecordingScreen
 
 
 class TrackHeightTests(unittest.TestCase):
+    def test_default_track_height_is_two_rows(self):
+        state = vcdtui.TUIState(0, 0, 1, [])
+        self.assertEqual(state.track_height, 2)
+
     def test_height_is_clamped_to_the_supported_range(self):
         self.assertEqual(vcdtui.adjust_track_height(1, -1), 1)
         self.assertEqual(vcdtui.adjust_track_height(4, 1), 4)
@@ -152,12 +156,29 @@ class BusMultiRowTests(unittest.TestCase):
     def test_two_rows_put_the_labels_on_their_own_row(self):
         rows = self.rows(height=2)
         self.assertEqual(
-            rows[1], vcdtui.render_bus_track(self.bus, 0, 200, 60, ascii_only=False)
+            rows[1], vcdtui.render_bus_track(
+                self.bus, 0, 200, 60, ascii_only=False, show_labels=False
+            )
         )
         self.assertIn("0001", rows[0])
         # Away from the labels the row stays blank, so the label is legible.
         self.assertNotIn("─", rows[0])
         self.assertNotIn("│", rows[0])
+
+    def test_two_row_bus_can_suppress_the_label_under_the_cursor(self):
+        baseline = self.rows(height=2)
+        label_column = baseline[0].index("0001")
+        rows = vcdtui.render_bus_track_rows(
+            self.bus, 0, 200, 60, ascii_only=False, height=2,
+            cursor_column=label_column,
+        )
+        self.assertNotIn("0001", rows[0])
+        self.assertIn("0010", rows[0])
+
+    def test_two_row_bus_does_not_duplicate_labels_inside_waveform(self):
+        rows = self.rows(height=2)
+        self.assertIn("0001", rows[0])
+        self.assertNotIn("0001", rows[1])
 
     def test_three_rows_draw_a_box_with_the_label_inside(self):
         rows = self.rows(height=3)
@@ -267,6 +288,13 @@ class MultiRowFrameTests(unittest.TestCase):
     def test_the_frame_returns_to_one_row(self):
         frame = draw(self.vcd, self.state(track_height=1), height=40)
         self.assertNotIn("┌", frame)
+
+    def test_two_row_bus_cursor_value_aligns_with_waveform_row(self):
+        frame = draw(self.vcd, self.state(track_height=2), height=40)
+        rows = frame.splitlines()
+        bus_row = next(i for i, row in enumerate(rows) if "v[3:0]" in row and "0000" in row)
+        self.assertIn("0000", rows[bus_row])
+        self.assertNotIn("0000", rows[bus_row - 1])
 
 
 if __name__ == "__main__":

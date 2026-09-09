@@ -56,6 +56,7 @@ class DrawnFrameTests(unittest.TestCase):
             selected=[True] * len(vcd.signals),
             expanded_scopes={("top",)},
             display_formats=["binary"] * len(vcd.signals),
+            track_height=1,
         )
         screen = RecordingScreen(14, 108)
         vcdtui._draw_tui(
