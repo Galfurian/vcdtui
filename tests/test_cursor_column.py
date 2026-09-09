@@ -39,8 +39,12 @@ class CursorColumnTests(unittest.TestCase):
     def test_a_tick_occupies_the_whole_run_of_columns_it_is_drawn_across(self):
         # Zoomed in past one tick per column, a tick spans several columns and
         # the cursor sits at the left edge of that run, where its value starts.
+        # The blocks are cut so that every tick gets one, the last included: the
+        # linear cut gave the first five ticks six columns each and left the
+        # final tick with none to be drawn in.
         self.assertEqual(vcdtui._cursor_column(0, 0, 5, 30), 0)
-        self.assertEqual(vcdtui._cursor_column(1, 0, 5, 30), 6)
+        self.assertEqual(vcdtui._cursor_column(1, 0, 5, 30), 5)
+        self.assertEqual(vcdtui._cursor_column(5, 0, 5, 30), 25)
 
     def test_the_viewport_start_maps_to_the_first_column(self):
         for start, end, width in VIEWPORTS:

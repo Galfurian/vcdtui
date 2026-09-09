@@ -26,11 +26,18 @@ from typing import (
     Union,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 MINIMUM_PYTHON = (3, 10)
 DEFAULT_WAVE_WIDTH = 80
 MINIMUM_WAVE_WIDTH = 32
+MIN_TRACK_HEIGHT = 1
+MAX_TRACK_HEIGHT = 4
+
+
+def adjust_track_height(height: int, delta: int) -> int:
+    """Clamp a track height change to the supported range."""
+    return min(MAX_TRACK_HEIGHT, max(MIN_TRACK_HEIGHT, height + delta))
 
 
 def python_version_error(version: Sequence[int]) -> Optional[str]:
@@ -216,6 +223,23 @@ class TreeItem:
     depth: int
     path: Tuple[str, ...]
     signal_index: Optional[int] = None
+    bit_position: Optional[int] = None
+    expandable: bool = False
+    bits_open: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class WaveRow:
+    """One track on screen: a signal, or one expanded bit of a vector signal."""
+
+    signal: Signal
+    signal_index: int
+    bit_position: Optional[int] = None
+
+    @property
+    def bit_key(self) -> Tuple[int, int]:
+        assert self.bit_position is not None
+        return (self.signal_index, self.bit_position)
 
 
 @dataclass
@@ -230,6 +254,10 @@ class TUIState:
     wave_focus: int = 0
     wave_offset: int = 0
     expanded_scopes: Set[Tuple[str, ...]] = field(default_factory=set)
+    expanded_signals: Set[int] = field(default_factory=set)
+    shown_bits: Set[Tuple[int, int]] = field(default_factory=set)
+    bit_signals: Dict[Tuple[int, int], Signal] = field(default_factory=dict)
+    track_height: int = MIN_TRACK_HEIGHT
     show_inspector: bool = False
     show_signal_tree: bool = True
     marker_a: Optional[int] = None
@@ -1063,6 +1091,101 @@ def next_edge(stream: ValueStream, cursor: int, kind: str, *, forward: bool) -> 
     return None if index < 0 else times[index]
 
 
+_BIT_RANGE_RE = re.compile(r"^\[(\d+):(\d+)\]$")
+
+
+def bit_numbers(signal: Signal) -> List[int]:
+    """The display numbers of a vector's bits, most significant first.
+
+    A declared range names the bits: [7:0] yields 7..0 and [0:7] yields 0..7,
+    in both cases msb first, which is the order the value string carries them
+    in. Without a declared range the width numbers them, width-1 down to 0.
+    """
+    match = _BIT_RANGE_RE.match(signal.bit_range or "")
+    if match:
+        first, last = int(match.group(1)), int(match.group(2))
+        if first >= last:
+            return list(range(first, last - 1, -1))
+        return list(range(first, last + 1))
+    return list(range(signal.width - 1, -1, -1))
+
+
+def is_expandable_vector(signal: Signal) -> bool:
+    """True for bit vectors whose individual bits can be shown as tracks."""
+    return signal.stream.kind == "bit" and signal.width > 1
+
+
+def build_bit_signal(signal: Signal, bit_position: int) -> Signal:
+    """Derive one single-bit signal from a vector; bit 0 is the most significant.
+
+    The bit's stream records a change only where that bit actually moved, so
+    edges and transitions on it mean what they say, rather than repeating the
+    parent vector's every change.
+    """
+    numbers = bit_numbers(signal)
+    number = numbers[bit_position]
+    changes: List[Change] = []
+    previous: Optional[str] = None
+    for change in signal.stream.changes:
+        value = change.value[bit_position]
+        if value == previous:
+            continue
+        changes.append(Change(change.time, value))
+        previous = value
+    stream = ValueStream(
+        identifier=f"{signal.stream.identifier}[{number}]",
+        width=1,
+        kind="bit",
+        changes=changes,
+    )
+    return Signal(
+        full_name=f"{signal.full_name}[{number}]",
+        reference=f"{signal.reference}[{number}]",
+        width=1,
+        var_type=signal.var_type,
+        stream=stream,
+    )
+
+
+def ctrl_navigation_target(
+    signal: Signal,
+    cursor: int,
+    range_start: int,
+    range_end: int,
+    timescale: TimeScale,
+    *,
+    forward: bool,
+) -> Tuple[Optional[int], str]:
+    """Resolve Ctrl+Left/Right for one signal.
+
+    A scalar steps to the previous/next clean binary edge; a vector steps to
+    the previous/next value change, which is the same idea at vector width.
+    Real and string tracks have no edges to step across. When no edge remains
+    ahead, the cursor is sent to the matching end of the active range, so the
+    first edge and the range start (or the last edge and the range end) are
+    both reachable. Returns ``(tick, status)``; a None tick means no move.
+    """
+    direction = "next" if forward else "previous"
+    if signal.stream.kind != "bit":
+        return None, f"no edges to step across for {signal.full_name}"
+    if signal.width == 1:
+        tick = next_edge(signal.stream, cursor, "any", forward=forward)
+        label = "binary edge"
+    else:
+        tick = next_transition(signal.stream, cursor, forward=forward)
+        label = "value change"
+    if tick is not None:
+        return tick, f"{label}: {signal.full_name} @ {tick} ({timescale.format_tick(tick)})"
+    boundary = range_end if forward else range_start
+    if cursor == boundary:
+        return None, f"no {direction} {label} for {signal.full_name}"
+    edge = "end" if forward else "start"
+    return boundary, (
+        f"no {direction} {label} for {signal.full_name}; "
+        f"moved to range {edge} ({timescale.format_tick(boundary)})"
+    )
+
+
 def pan_window(
     view_start: int,
     view_end: int,
@@ -1174,6 +1297,7 @@ def all_scope_paths(signals: Sequence[Signal]) -> Set[Tuple[str, ...]]:
 def build_tree_items(
     signals: Sequence[Signal],
     expanded_scopes: Set[Tuple[str, ...]],
+    expanded_signals: Optional[Set[int]] = None,
 ) -> List[TreeItem]:
     children: Dict[Tuple[str, ...], List[str]] = {}
     members: Dict[Tuple[str, ...], List[int]] = {}
@@ -1188,6 +1312,7 @@ def build_tree_items(
             parent = parent + (component,)
         members.setdefault(parent, []).append(index)
 
+    open_signals = expanded_signals or set()
     items: List[TreeItem] = []
 
     def visit(parent: Tuple[str, ...], depth: int) -> None:
@@ -1198,7 +1323,30 @@ def build_tree_items(
                 visit(path, depth + 1)
         for index in members.get(parent, []):
             signal = signals[index]
-            items.append(TreeItem("signal", signal.display_reference, depth, parent, index))
+            expandable = is_expandable_vector(signal)
+            items.append(
+                TreeItem(
+                    "signal",
+                    signal.display_reference,
+                    depth,
+                    parent,
+                    index,
+                    expandable=expandable,
+                    bits_open=index in open_signals and expandable,
+                )
+            )
+            if expandable and index in open_signals:
+                for position, number in enumerate(bit_numbers(signal)):
+                    items.append(
+                        TreeItem(
+                            "bit",
+                            f"{signal.reference}[{number}]",
+                            depth + 1,
+                            parent,
+                            index,
+                            bit_position=position,
+                        )
+                    )
 
     visit((), 0)
     return items
@@ -1314,7 +1462,22 @@ def _column_edge_tuple(start: int, end: int, width: int) -> Tuple[int, ...]:
     if width <= 0:
         return ()
     span = end - start
-    return tuple(start + (span * index) // width for index in range(width + 1))
+    if span >= width:
+        return tuple(start + (span * index) // width for index in range(width + 1))
+    # More columns than ticks: every tick, the last one included, owns a block
+    # of columns. A linear split starved exactly the final tick - it closed the
+    # partition without owning a column - so a change landing on it was drawn by
+    # the previous run's owner and then contradicted by the columns after it,
+    # and the cursor could not move onto it, because there was no column that
+    # owned it to draw the cursor in.
+    ticks = span + 1
+    edges: List[int] = []
+    tick = 0
+    for column in range(width + 1):
+        while tick < span and ((tick + 1) * width) // ticks <= column:
+            tick += 1
+        edges.append(start + tick)
+    return tuple(edges)
 
 
 def _column_edges(start: int, end: int, width: int) -> List[int]:
@@ -1325,6 +1488,11 @@ def _column_edges(start: int, end: int, width: int) -> List[int]:
     tick per column instead aliases: a clock toggling faster than one column per
     period came out as a flat line, which is a false picture rather than a
     coarse one.
+
+    Zoomed in past one tick per column the partition is by tick, not linear:
+    every tick owns a whole block of columns, so each of them - the viewport's
+    last tick included - has a column where its changes and its cursor are
+    drawn.
     """
     return list(_column_edge_tuple(start, end, width))
 
@@ -1343,8 +1511,8 @@ def _column_layout(
 
     Zoomed in past one tick per column a tick is drawn across a run of columns.
     The first column of the run owns it and the rest own nothing, so the value
-    starts where the tick starts. The final run also owns the viewport's last
-    tick, which has no edge of its own to sit on.
+    starts where the tick starts. The last owner's span closes past the
+    viewport's final tick, which has no edge of its own to sit on.
     """
     edges = _column_edge_tuple(start, end, width)
     if not edges:
@@ -1428,15 +1596,50 @@ def _level_glyph(value: Optional[str], high: str) -> str:
     return high if value == "1" else "_"
 
 
-def _level_glyph(value: Optional[str], high: str) -> str:
-    """The glyph for a held scalar level."""
-    if value is None:
-        return "?"
-    if "x" in value:
-        return "x"
-    if "z" in value:
-        return "z"
-    return high if value == "1" else "_"
+_SCALAR_GLYPH_STATES = ("dense", "rising", "falling", "high", "low", "x", "z", "?")
+
+
+def _scalar_column_states(
+    signal: Signal, start: int, end: int, width: int
+) -> List[str]:
+    """Classify every column of a scalar track.
+
+    The classification is shared by the one-row and multi-row renderers, so a
+    taller track shows exactly the same transitions in the same columns rather
+    than a second opinion about where they land.
+    """
+    edges = _column_edge_tuple(start, end, width)
+    if not edges:
+        return []
+    states: List[str] = []
+    for column in range(width):
+        low, stop = _column_span(edges, column, end)
+        first, last = _change_range(signal.stream, low, stop, start)
+        # A column owning no ticks is a later column of a tick's run, so it
+        # follows the owner that already drew the change: the value at its edge.
+        leaving = signal.stream.value_at(max(low, stop - 1))
+        if last - first >= 2:
+            states.append("dense")
+            continue
+        if last - first == 1:
+            entering = signal.stream.value_before(signal.stream.changes[first].time)
+            if (entering, leaving) == ("0", "1"):
+                states.append("rising")
+                continue
+            if (entering, leaving) == ("1", "0"):
+                states.append("falling")
+                continue
+        if leaving is None:
+            states.append("?")
+        elif "x" in leaving:
+            states.append("x")
+        elif "z" in leaving:
+            states.append("z")
+        elif leaving == "1":
+            states.append("high")
+        else:
+            states.append("low")
+    return states
 
 
 def render_scalar_track(
@@ -1453,31 +1656,120 @@ def render_scalar_track(
     of picking one: sampling a single tick per column drew a clock toggling
     faster than the column width as a flat line.
     """
-    edges = _column_edge_tuple(start, end, width)
-    if not edges:
-        return ""
     dense = "#" if ascii_only else "▓"
     high = "-" if ascii_only else "‾"
-    output: List[str] = []
+    glyphs = {
+        "dense": dense,
+        "rising": "/",
+        "falling": "\\",
+        "high": high,
+        "low": "_",
+        "x": "x",
+        "z": "z",
+        "?": "?",
+    }
+    return "".join(
+        glyphs[state] for state in _scalar_column_states(signal, start, end, width)
+    )
+
+
+def render_scalar_track_rows(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+    height: int = 1,
+) -> List[str]:
+    """Draw a scalar across ``height`` rows as a square wave.
+
+    One row keeps the single-line glyphs. Two or more rows give the wave a real
+    shape: the high level runs along the top row, the low level along the bottom
+    one, and an edge joins them vertically. x and z have no level to draw, so
+    they fill the whole column, as a dense column fills it with the dense glyph.
+    """
+    if height <= 1:
+        return [render_scalar_track(signal, start, end, width, ascii_only=ascii_only)]
+    states = _scalar_column_states(signal, start, end, width)
+    grid = [[" "] * width for _ in range(height)]
+    top, bottom = 0, height - 1
+    dense = "#" if ascii_only else "▓"
+    for column, state in enumerate(states):
+        if state in ("dense", "x", "z", "?"):
+            fill = dense if state == "dense" else state
+            for row in range(height):
+                grid[row][column] = fill
+        elif state in ("rising", "falling"):
+            if ascii_only:
+                if height == 2:
+                    grid[bottom][column] = "/" if state == "rising" else "\\"
+                else:
+                    for row in range(1, height):
+                        grid[row][column] = "|"
+            else:
+                grid[top][column] = "┌" if state == "rising" else "┐"
+                grid[bottom][column] = "┘" if state == "rising" else "└"
+                for row in range(1, height - 1):
+                    grid[row][column] = "│"
+        elif state == "high":
+            grid[top][column] = "_" if ascii_only else "─"
+        else:
+            grid[bottom][column] = "_" if ascii_only else "─"
+    return ["".join(row) for row in grid]
+
+
+def _bus_column_kinds(
+    signal: Signal, start: int, end: int, width: int
+) -> List[str]:
+    """Classify every column of a bus track: dense, boundary, or run."""
+    edges = _column_edge_tuple(start, end, width)
+    if not edges:
+        return []
+    kinds: List[str] = []
     for column in range(width):
         low, stop = _column_span(edges, column, end)
         first, last = _change_range(signal.stream, low, stop, start)
-        # A column owning no ticks is a later column of a tick's run, so it
-        # follows the owner that already drew the change: the value at its edge.
-        leaving = signal.stream.value_at(max(low, stop - 1))
-        if last - first >= 2:
-            output.append(dense)
+        count = last - first
+        kinds.append("dense" if count >= 2 else "boundary" if count == 1 else "run")
+    return kinds
+
+
+def _bus_runs(kinds: Sequence[str], width: int) -> Iterator[Tuple[int, int]]:
+    """Maximal spans of run columns, as ``(start, end)`` half-open indexes."""
+    run_start = 0
+    while run_start < width:
+        if kinds[run_start] != "run":
+            run_start += 1
             continue
-        if last - first == 1:
-            entering = signal.stream.value_before(signal.stream.changes[first].time)
-            if (entering, leaving) == ("0", "1"):
-                output.append("/")
-                continue
-            if (entering, leaving) == ("1", "0"):
-                output.append("\\")
-                continue
-        output.append(_level_glyph(leaving, high))
-    return "".join(output)
+        run_end = run_start
+        while run_end < width and kinds[run_end] == "run":
+            run_end += 1
+        yield run_start, run_end
+        run_start = run_end
+
+
+def _place_bus_labels(
+    row: List[str],
+    kinds: Sequence[str],
+    edges: Sequence[int],
+    signal: Signal,
+    width: int,
+    display_format: str,
+) -> None:
+    """Centre each held value over its run, in place, when it fits entirely.
+
+    A truncated label is a confident wrong answer: "0000" cut to "0" reads as
+    the value being 0, so a run too narrow for its label is left blank.
+    """
+    for run_start, run_end in _bus_runs(kinds, width):
+        room = run_end - run_start
+        raw_value = signal.stream.value_at(edges[run_start]) or "?"
+        label = format_signal_value(signal, raw_value, display_format)
+        if len(label) <= room:
+            label_start = run_start + (room - len(label)) // 2
+            for offset, char in enumerate(label):
+                row[label_start + offset] = char
 
 
 def render_bus_track(
@@ -1494,39 +1786,81 @@ def render_bus_track(
     A column holding one change is a boundary, one holding several is marked
     dense, and a run of unchanged columns carries the centred value.
     """
-    edges = _column_edge_tuple(start, end, width)
-    if not edges:
+    kinds = _bus_column_kinds(signal, start, end, width)
+    if not kinds:
         return ""
     horizontal = "-" if ascii_only else "─"
     boundary = "|" if ascii_only else "│"
     dense = "#" if ascii_only else "▓"
-
-    line: List[str] = []
-    for column in range(width):
-        low, stop = _column_span(edges, column, end)
-        first, last = _change_range(signal.stream, low, stop, start)
-        count = last - first
-        line.append(dense if count >= 2 else boundary if count == 1 else horizontal)
-
-    run_start = 0
-    while run_start < width:
-        if line[run_start] != horizontal:
-            run_start += 1
-            continue
-        run_end = run_start
-        while run_end < width and line[run_end] == horizontal:
-            run_end += 1
-        room = run_end - run_start
-        raw_value = signal.stream.value_at(edges[run_start]) or "?"
-        label = format_signal_value(signal, raw_value, display_format)
-        # A truncated label is a confident wrong answer: "0000" cut to "0" reads
-        # as the value being 0. Leave the run blank and let the user zoom in.
-        if len(label) <= room:
-            label_start = run_start + (room - len(label)) // 2
-            for offset, char in enumerate(label):
-                line[label_start + offset] = char
-        run_start = run_end
+    line = [
+        dense if kind == "dense" else boundary if kind == "boundary" else horizontal
+        for kind in kinds
+    ]
+    _place_bus_labels(
+        line, kinds, _column_edge_tuple(start, end, width), signal, width, display_format
+    )
     return "".join(line)
+
+
+def render_bus_track_rows(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+    height: int = 1,
+    display_format: str = "binary",
+) -> List[str]:
+    """Draw a bus across ``height`` rows.
+
+    One row keeps the single-line track. Two rows put the labels on their own
+    row above the single-line track. Three or more draw a box: the held runs
+    become segments with top and bottom borders, boundaries join them, and the
+    value sits centred in the middle row.
+    """
+    if height <= 1:
+        return [
+            render_bus_track(
+                signal, start, end, width, ascii_only=ascii_only, display_format=display_format
+            )
+        ]
+    kinds = _bus_column_kinds(signal, start, end, width)
+    edges = _column_edge_tuple(start, end, width)
+    if height == 2:
+        labels = [" "] * width
+        _place_bus_labels(labels, kinds, edges, signal, width, display_format)
+        return [
+            "".join(labels),
+            render_bus_track(
+                signal, start, end, width, ascii_only=ascii_only, display_format=display_format
+            ),
+        ]
+    horizontal = "-" if ascii_only else "─"
+    dense = "#" if ascii_only else "▓"
+    if ascii_only:
+        corner_top = corner_bottom = "+"
+        side = "|"
+    else:
+        corner_top, corner_bottom, side = "┬", "┴", "│"
+    grid = [[" "] * width for _ in range(height)]
+    top, bottom = 0, height - 1
+    for column, kind in enumerate(kinds):
+        if kind == "dense":
+            for row in range(height):
+                grid[row][column] = dense
+        elif kind == "boundary":
+            grid[top][column] = corner_top
+            grid[bottom][column] = corner_bottom
+            for row in range(1, height - 1):
+                grid[row][column] = side
+        else:
+            grid[top][column] = horizontal
+            grid[bottom][column] = horizontal
+    _place_bus_labels(
+        grid[height // 2], kinds, edges, signal, width, display_format
+    )
+    return ["".join(row) for row in grid]
 
 
 def render_waveform_track(
@@ -1538,10 +1872,39 @@ def render_waveform_track(
     ascii_only: bool,
     display_format: str = "binary",
 ) -> str:
+    return render_waveform_track_rows(
+        signal,
+        start,
+        end,
+        width,
+        ascii_only=ascii_only,
+        display_format=display_format,
+    )[0]
+
+
+def render_waveform_track_rows(
+    signal: Signal,
+    start: int,
+    end: int,
+    width: int,
+    *,
+    ascii_only: bool,
+    height: int = 1,
+    display_format: str = "binary",
+) -> List[str]:
+    """The waveform for one signal as ``height`` rows of exactly ``width`` columns."""
     if signal.width == 1 and signal.stream.kind == "bit":
-        return render_scalar_track(signal, start, end, width, ascii_only=ascii_only)
-    return render_bus_track(
-        signal, start, end, width, ascii_only=ascii_only, display_format=display_format
+        return render_scalar_track_rows(
+            signal, start, end, width, ascii_only=ascii_only, height=height
+        )
+    return render_bus_track_rows(
+        signal,
+        start,
+        end,
+        width,
+        ascii_only=ascii_only,
+        height=height,
+        display_format=display_format,
     )
 
 
@@ -1688,8 +2051,51 @@ def _ensure_offset(focus: int, offset: int, capacity: int, count: int) -> Tuple[
     return focus, offset
 
 
-def _visible_signal_indexes(state: TUIState) -> List[int]:
-    return [index for index, enabled in enumerate(state.selected) if enabled]
+def _bit_signal(
+    state: TUIState, signals: Sequence[Signal], signal_index: int, bit_position: int
+) -> Signal:
+    """The single-bit signal for one expanded bit, built once and then cached."""
+    key = (signal_index, bit_position)
+    signal = state.bit_signals.get(key)
+    if signal is None:
+        signal = build_bit_signal(signals[signal_index], bit_position)
+        state.bit_signals[key] = signal
+    return signal
+
+
+def visible_wave_rows(
+    all_signals: Sequence[Signal], state: TUIState
+) -> List[WaveRow]:
+    """The tracks on screen, in draw order.
+
+    Each shown signal is followed by the bits expanded from it, so a bit sits
+    under its own vector. A bit survives its parent being hidden: collapsing a
+    vector to read its bits alone is a legitimate way to look at it, so those
+    bits move to the end in declaration order instead of disappearing.
+    """
+    rows: List[WaveRow] = []
+    trailing: List[WaveRow] = []
+    for index, signal in enumerate(all_signals):
+        bits = [position for parent, position in state.shown_bits if parent == index]
+        bit_rows = [
+            WaveRow(_bit_signal(state, all_signals, index, position), index, position)
+            for position in sorted(bits)
+        ]
+        if state.selected[index]:
+            rows.append(WaveRow(signal, index))
+            rows.extend(bit_rows)
+        else:
+            trailing.extend(bit_rows)
+    return rows + trailing
+
+
+def wave_row_format(row: WaveRow, state: TUIState) -> str:
+    """The display format of a row: bits are single values, always binary."""
+    if row.bit_position is not None:
+        return "binary"
+    if row.signal_index < len(state.display_formats):
+        return state.display_formats[row.signal_index]
+    return "binary"
 
 
 def marker_values(
@@ -1853,8 +2259,16 @@ def render_timeline_ruler(
     for tick in major_ticks:
         col = _cursor_column(tick, start, end, width)
         rule[col] = major_glyph
+    # Zoomed out, a column covers many ticks and the final column is the last
+    # tick's position: the closing mark and its label belong at the right edge.
+    # Zoomed in past one tick per column, every tick - the last one included -
+    # owns a block of columns and the ruler marks tick positions: a closing
+    # mark forced onto the final column would sit past the final tick's own
+    # position and read as one more tick, which does not exist.
+    zoomed_in = end - start < width
     rule[0] = major_glyph
-    rule[-1] = major_glyph
+    if not zoomed_in:
+        rule[-1] = major_glyph
 
     occupied = [False] * width
 
@@ -1872,7 +2286,11 @@ def render_timeline_ruler(
     start_label = timescale.format_tick(start)
     end_label = timescale.format_tick(end)
     place(start_label, 0)
-    place(end_label, max(0, width - len(end_label)))
+    if zoomed_in:
+        end_col = _cursor_column(end, start, end, width)
+        place(end_label, end_col - len(end_label) // 2)
+    else:
+        place(end_label, max(0, width - len(end_label)))
 
     for tick in major_ticks:
         if tick in (start, end):
@@ -1980,17 +2398,18 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "  Tab                 switch signal-tree / waveform focus",
         "  s                   show/hide the signal-selection pane",
         "  Up/Down, j/k        move within the focused pane",
-        "  Enter               expand / collapse the focused scope",
-        "  Space               show/hide the focused signal, or a whole scope",
+        "  Enter               expand / collapse the focused scope or vector",
+        "  Space               show/hide the focused signal, bit, or a whole scope",
         "  a / Ctrl+A          show all signals, or hide all when all are shown",
         "  A                   hide all signals",
         "  v                   value format menu (Up/Down, Enter, Esc)",
         "Time & view",
         f"  {arrows:<20} cursor one VCD tick",
-        f"  {ctrl_arrows:<20} previous / next clean binary edge",
+        f"  {ctrl_arrows:<20} previous / next edge; vectors step to value changes",
         "  Home / End          active-range start / end",
         "  g                   goto exact tick or physical time",
         "  < / >   + / -       pan / zoom viewport",
+        "  T / t               taller / shorter waveform tracks",
         "  n/N  e/E  r/R  f/F transition / edge / rising / falling",
         "Reading the waveform",
         "  ▓ (# in --ascii)     column holds several changes; zoom in to resolve",
@@ -2028,8 +2447,8 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
     arrows = "<- -> cursor" if ascii_only else "←→ cursor"
     ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
     candidates = [
-        ["Tab pane", "Space show/hide", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "m/M markers", "F1/? help", "q quit"],
-        ["Tab pane", "Space show/hide", "v format", arrows, "+/- zoom", "F1/? help", "q quit"],
+        ["Tab pane", "Space show/hide", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "T tracks", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "Space show/hide", "v format", arrows, "+/- zoom", "T tracks", "F1/? help", "q quit"],
         ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
         [arrows, "F1/? help", "q quit"],
         ["F1/? help", "q quit"],
@@ -2254,8 +2673,18 @@ def _tree_item_text(item: TreeItem, state: TUIState, *, ascii_only: bool) -> str
         arrow = ("v" if is_open else ">") if ascii_only else ("▼" if is_open else "▶")
         return f"{indent}{arrow} {item.label}"
     assert item.signal_index is not None
+    if item.kind == "bit":
+        assert item.bit_position is not None
+        checked = "x" if (item.signal_index, item.bit_position) in state.shown_bits else " "
+        return f"{indent}[{checked}] {item.label}"
     checked = "x" if state.selected[item.signal_index] else " "
-    return f"{indent}[{checked}] {item.label}"
+    # An expandable vector carries its own arrow, next to the checkbox: the
+    # same affordance as a scope, for the same operation at a finer grain.
+    arrow = ""
+    if item.expandable:
+        arrow = ("v" if item.bits_open else ">") if ascii_only else ("▾" if item.bits_open else "▸")
+        arrow += " "
+    return f"{indent}[{checked}] {arrow}{item.label}"
 
 
 def _clip_end(text: str, width: int, *, ascii_only: bool) -> str:
@@ -2316,7 +2745,9 @@ def _draw_tui(
         stdscr.refresh()
         return
 
-    tree_items = build_tree_items(all_signals, state.expanded_scopes)
+    tree_items = build_tree_items(
+        all_signals, state.expanded_scopes, state.expanded_signals
+    )
     meta_width = min(28, max(18, width // 5))
     divider1_x: Optional[int]
     if state.show_signal_tree:
@@ -2337,10 +2768,10 @@ def _draw_tui(
     wave_x = divider2_x + 2
     wave_width = max(8, width - wave_x - 1)
 
-    focused = _wave_focused_signal_index(state)
-    if focused is not None:
+    focused_row = _wave_focused_row(all_signals, state)
+    if focused_row is not None:
         density = column_density_note(
-            all_signals[focused],
+            focused_row.signal,
             state.cursor,
             state.view_start,
             state.view_end,
@@ -2360,22 +2791,26 @@ def _draw_tui(
     main_bottom = height - 3 - marker_height - inspector_height
     header_row = 3
     content_row = 4
-    main_capacity = max(1, main_bottom - content_row + 1)
+    line_capacity = max(1, main_bottom - content_row + 1)
+    # A track taller than one row is a block of rows plus a blank separator, so
+    # neighbouring tracks cannot merge into what would read as one waveform.
+    rows_per_track = state.track_height + (1 if state.track_height > 1 else 0)
+    wave_capacity = max(1, line_capacity // rows_per_track)
 
     if state.show_signal_tree:
         state.tree_focus, state.tree_offset = _ensure_offset(
             state.tree_focus,
             state.tree_offset,
-            main_capacity,
+            line_capacity,
             len(tree_items),
         )
 
-    visible_indexes = _visible_signal_indexes(state)
+    rows = visible_wave_rows(all_signals, state)
     state.wave_focus, state.wave_offset = _ensure_offset(
         state.wave_focus,
         state.wave_offset,
-        main_capacity,
-        len(visible_indexes),
+        wave_capacity,
+        len(rows),
     )
 
     _draw_ruler(
@@ -2399,7 +2834,7 @@ def _draw_tui(
         _safe_addstr(stdscr, row, divider2_x, divider, attrs["dim"])
 
     if state.show_signal_tree:
-        tree_end = min(len(tree_items), state.tree_offset + main_capacity)
+        tree_end = min(len(tree_items), state.tree_offset + line_capacity)
         for row, item_index in enumerate(range(state.tree_offset, tree_end), start=content_row):
             item = tree_items[item_index]
             text = _clip_end(
@@ -2412,17 +2847,18 @@ def _draw_tui(
                 attr |= attrs["focus"]
             _safe_addstr(stdscr, row, 0, text, attr)
 
-    wave_end = min(len(visible_indexes), state.wave_offset + main_capacity)
-    shown_indexes = visible_indexes[state.wave_offset:wave_end]
+    wave_end = min(len(rows), state.wave_offset + wave_capacity)
+    shown_rows = rows[state.wave_offset:wave_end]
     cursor_in_view = state.view_start <= state.cursor <= state.view_end
 
-    if not shown_indexes:
+    if not rows:
         _safe_addstr(stdscr, content_row, meta_x, "no signals selected", attrs["dim"])
-    for row, visible_pos in enumerate(range(state.wave_offset, wave_end), start=content_row):
-        signal_index = visible_indexes[visible_pos]
-        signal = all_signals[signal_index]
+    meta_line = (state.track_height - 1) // 2
+    for position, wave_row in enumerate(shown_rows, start=state.wave_offset):
+        row = content_row + (position - state.wave_offset) * rows_per_track
+        signal = wave_row.signal
         raw_value = signal.stream.value_at(state.cursor) or "?"
-        display_format = state.display_formats[signal_index]
+        display_format = wave_row_format(wave_row, state)
         value = format_signal_value(signal, raw_value, display_format)
         value_room = min(max(len(value), 1), 12)
         shown_value = _clip_middle(value, value_room, ascii_only=ascii_only)
@@ -2432,36 +2868,39 @@ def _draw_tui(
             name = ("…" + name[-(name_room - 1):]) if not ascii_only and name_room > 1 else name[-name_room:]
         meta = f"{name:<{name_room}} {shown_value:>{value_room}}"
         meta_attr = 0
-        if state.focus_pane == "wave" and visible_pos == state.wave_focus:
+        if state.focus_pane == "wave" and position == state.wave_focus:
             meta_attr |= attrs["focus"]
-        _safe_addstr(stdscr, row, meta_x, meta, meta_attr)
+        _safe_addstr(stdscr, row + meta_line, meta_x, meta, meta_attr)
 
-        track = render_waveform_track(
+        track_lines = render_waveform_track_rows(
             signal,
             state.view_start,
             state.view_end,
             wave_width,
             ascii_only=ascii_only,
+            height=state.track_height,
             display_format=display_format,
         )
         track_attr = attrs["vector"] if signal.width > 1 else attrs["scalar"]
         if "x" in raw_value or "z" in raw_value:
             track_attr = attrs["bad"]
-        _safe_addstr(stdscr, row, wave_x, track, track_attr)
-        for tick, marker_attr in ((state.marker_a, attrs["marker_a"]), (state.marker_b, attrs["marker_b"])):
-            if tick is not None and state.view_start <= tick <= state.view_end and track:
-                marker_col = _cursor_column(tick, state.view_start, state.view_end, wave_width)
-                glyph = cursor_track_glyph(track, marker_col)
-                _safe_addstr(stdscr, row, wave_x + marker_col, glyph, marker_attr)
-        if cursor_in_view and track:
-            cursor_col = _cursor_column(
-                state.cursor,
-                state.view_start,
-                state.view_end,
-                wave_width,
-            )
-            glyph = cursor_track_glyph(track, cursor_col)
-            _safe_addstr(stdscr, row, wave_x + cursor_col, glyph, attrs["cursor"])
+        for line_offset, track in enumerate(track_lines):
+            track_row = row + line_offset
+            _safe_addstr(stdscr, track_row, wave_x, track, track_attr)
+            for tick, marker_attr in ((state.marker_a, attrs["marker_a"]), (state.marker_b, attrs["marker_b"])):
+                if tick is not None and state.view_start <= tick <= state.view_end and track:
+                    marker_col = _cursor_column(tick, state.view_start, state.view_end, wave_width)
+                    glyph = cursor_track_glyph(track, marker_col)
+                    _safe_addstr(stdscr, track_row, wave_x + marker_col, glyph, marker_attr)
+            if cursor_in_view and track:
+                cursor_col = _cursor_column(
+                    state.cursor,
+                    state.view_start,
+                    state.view_end,
+                    wave_width,
+                )
+                glyph = cursor_track_glyph(track, cursor_col)
+                _safe_addstr(stdscr, track_row, wave_x + cursor_col, glyph, attrs["cursor"])
 
     panel_top = main_bottom + 1
     if state.show_inspector and inspector_height > 0:
@@ -2469,13 +2908,12 @@ def _draw_tui(
         rule = "-" if ascii_only else "─"
         _safe_addstr(stdscr, inspector_top, 0, rule * max(1, width - 1), attrs["dim"])
         _safe_addstr(stdscr, inspector_top + 1, 0, "inspection: before -> after", curses.A_BOLD)
-        inspect_signals = [all_signals[index] for index in shown_indexes]
-        inspection = inspect_at(inspect_signals, state.cursor)
-        for offset, (item, signal_index) in enumerate(zip(inspection, shown_indexes), start=2):
+        inspection = inspect_at([wave_row.signal for wave_row in shown_rows], state.cursor)
+        for offset, (item, wave_row) in enumerate(zip(inspection, shown_rows), start=2):
             row = inspector_top + offset
             if row >= height - 1:
                 break
-            display_format = state.display_formats[signal_index]
+            display_format = wave_row_format(wave_row, state)
             before = format_signal_value(item.signal, item.before, display_format)
             after = format_signal_value(item.signal, item.after, display_format)
             marker = "*" if item.changed else " "
@@ -2487,21 +2925,20 @@ def _draw_tui(
     if marker_height > 0:
         rule = "-" if ascii_only else "─"
         _safe_addstr(stdscr, panel_top, 0, rule * max(1, width - 1), attrs["dim"])
-        table_signals = [all_signals[index] for index in visible_indexes]
-        table_formats = [state.display_formats[index] for index in visible_indexes]
         lines = marker_table_lines(
             vcd,
-            table_signals,
+            [wave_row.signal for wave_row in rows],
             state.marker_a,
             state.marker_b,
             width - 1,
             ascii_only=ascii_only,
-            display_formats=table_formats,
+            display_formats=[wave_row_format(wave_row, state) for wave_row in rows],
         )
         for offset, line in enumerate(lines[: max(0, marker_height - 1)], start=1):
             _safe_addstr(stdscr, panel_top + offset, 0, line)
 
-    selected_count = len(visible_indexes)
+    selected_count = sum(state.selected)
+    bits_count = len(state.shown_bits)
     pane = state.focus_pane
     marker_status = []
     if state.marker_a is not None:
@@ -2512,8 +2949,9 @@ def _draw_tui(
     if delta is not None:
         marker_status.append(f"delta={delta}")
     marker_text = (" | " + " ".join(marker_status)) if marker_status else ""
+    bits_text = f" | bits {bits_count}" if bits_count else ""
     status = state.status or (
-        f"pane={pane} | selected {selected_count}/{len(all_signals)} | "
+        f"pane={pane} | selected {selected_count}/{len(all_signals)}{bits_text} | "
         f"range {range_start}..{range_end}{marker_text}"
     )
     if height >= 2:
@@ -2553,28 +2991,49 @@ def _move_to_time(
 
 
 def _tree_focused_item(signals: Sequence[Signal], state: TUIState) -> Optional[TreeItem]:
-    items = build_tree_items(signals, state.expanded_scopes)
+    items = build_tree_items(signals, state.expanded_scopes, state.expanded_signals)
     if not items:
         return None
     state.tree_focus = min(max(0, state.tree_focus), len(items) - 1)
     return items[state.tree_focus]
 
 
-def _wave_focused_signal_index(state: TUIState) -> Optional[int]:
-    indexes = _visible_signal_indexes(state)
-    if not indexes:
+def _wave_focused_row(
+    all_signals: Sequence[Signal], state: TUIState
+) -> Optional[WaveRow]:
+    rows = visible_wave_rows(all_signals, state)
+    if not rows:
         return None
-    state.wave_focus = min(max(0, state.wave_focus), len(indexes) - 1)
-    return indexes[state.wave_focus]
+    state.wave_focus = min(max(0, state.wave_focus), len(rows) - 1)
+    return rows[state.wave_focus]
 
 
-def _navigation_signal_index(signals: Sequence[Signal], state: TUIState) -> Optional[int]:
+def _navigation_target(
+    all_signals: Sequence[Signal], state: TUIState
+) -> Optional[Tuple[Signal, Optional[int]]]:
+    """The signal the temporal keys act on, and its index when it is a declared one.
+
+    An expanded bit is navigable like any scalar, but it owns no place in the
+    display-format table, so its index is None.
+    """
     if state.focus_pane == "tree":
-        item = _tree_focused_item(signals, state)
-        if item is not None and item.kind == "signal":
-            return item.signal_index
+        item = _tree_focused_item(all_signals, state)
+        if item is None or item.signal_index is None:
+            return None
+        if item.kind == "bit":
+            assert item.bit_position is not None
+            return (
+                _bit_signal(state, all_signals, item.signal_index, item.bit_position),
+                None,
+            )
+        if item.kind == "signal":
+            return all_signals[item.signal_index], item.signal_index
         return None
-    return _wave_focused_signal_index(state)
+    row = _wave_focused_row(all_signals, state)
+    if row is None:
+        return None
+    index = None if row.bit_position is not None else row.signal_index
+    return row.signal, index
 
 
 def run_tui(
@@ -2658,13 +3117,21 @@ def run_tui(
                 item = _tree_focused_item(all_signals, state)
                 if item is None:
                     continue
-                if item.kind != "scope":
-                    state.status = "press Space to show or hide a signal"
-                    continue
-                if item.path in state.expanded_scopes:
-                    state.expanded_scopes.remove(item.path)
+                if item.kind == "scope":
+                    if item.path in state.expanded_scopes:
+                        state.expanded_scopes.remove(item.path)
+                    else:
+                        state.expanded_scopes.add(item.path)
+                elif item.kind == "signal" and item.expandable:
+                    assert item.signal_index is not None
+                    if item.signal_index in state.expanded_signals:
+                        state.expanded_signals.remove(item.signal_index)
+                        state.status = f"bits of {all_signals[item.signal_index].full_name} hidden"
+                    else:
+                        state.expanded_signals.add(item.signal_index)
+                        state.status = f"bits of {all_signals[item.signal_index].full_name} listed"
                 else:
-                    state.expanded_scopes.add(item.path)
+                    state.status = "press Space to show or hide a signal"
                 continue
 
             if key == ord(" "):
@@ -2681,32 +3148,56 @@ def run_tui(
                             f"{scope_name}: {len(indexes)} signals "
                             f"{'shown' if shown else 'hidden'}"
                         )
+                    elif item.kind == "bit":
+                        assert item.signal_index is not None and item.bit_position is not None
+                        bit_key = (item.signal_index, item.bit_position)
+                        if bit_key in state.shown_bits:
+                            state.shown_bits.discard(bit_key)
+                            state.status = f"{item.label} hidden"
+                        else:
+                            state.shown_bits.add(bit_key)
+                            state.status = f"{item.label} shown"
                     elif item.signal_index is not None:
                         state.selected[item.signal_index] = not state.selected[item.signal_index]
                 else:
-                    index = _wave_focused_signal_index(state)
-                    if index is not None:
-                        state.selected[index] = False
+                    wave_row = _wave_focused_row(all_signals, state)
+                    if wave_row is not None:
+                        if wave_row.bit_position is None:
+                            state.selected[wave_row.signal_index] = False
+                        else:
+                            state.shown_bits.discard(wave_row.bit_key)
                 continue
 
             if key in (ord("a"), _CTRL_A):
                 state.selected[:] = toggle_all_selection(state.selected)
                 shown = sum(state.selected)
+                if not shown:
+                    state.shown_bits.clear()
                 state.status = "all signals shown" if shown else "all signals hidden"
                 continue
             if key == ord("A"):
                 state.selected[:] = [False] * len(all_signals)
+                state.shown_bits.clear()
                 state.status = "all signals hidden"
                 continue
+            if key in (ord("t"), ord("T")):
+                new_height = adjust_track_height(state.track_height, 1 if key == ord("T") else -1)
+                if new_height == state.track_height:
+                    state.status = f"track height is already {new_height} row(s)"
+                else:
+                    state.track_height = new_height
+                    state.status = f"track height: {new_height} row(s)"
+                continue
             if key in (ord("v"), ord("V")):
-                signal_index = _navigation_signal_index(all_signals, state)
-                if signal_index is None:
+                target = _navigation_target(all_signals, state)
+                if target is None:
                     state.status = "focus a signal before choosing a value format"
                     continue
-                signal = all_signals[signal_index]
+                signal, signal_index = target
                 if signal.width <= 1:
                     state.status = f"{signal.full_name} is scalar; binary display is fixed"
                     continue
+                assert signal_index is not None
                 selected_format = _prompt_value_format(
                     stdscr, signal, state.display_formats[signal_index]
                 )
@@ -2733,23 +3224,22 @@ def run_tui(
 
             ctrl_forward = _ctrl_horizontal_direction(curses, key)
             if ctrl_forward is not None:
-                signal_index = _navigation_signal_index(all_signals, state)
-                if signal_index is None:
+                target = _navigation_target(all_signals, state)
+                if target is None:
                     state.status = "select/focus a signal before temporal navigation"
                     continue
-                signal = all_signals[signal_index]
-                tick = next_edge(signal.stream, state.cursor, "any", forward=ctrl_forward)
-                if tick is None:
-                    state.status = (
-                        f"no {'next' if ctrl_forward else 'previous'} binary edge "
-                        f"for {signal.full_name}"
-                    )
-                else:
+                signal, _ = target
+                tick, message = ctrl_navigation_target(
+                    signal,
+                    state.cursor,
+                    start,
+                    end,
+                    vcd.timescale,
+                    forward=ctrl_forward,
+                )
+                if tick is not None:
                     _move_to_time(state, tick, start, end)
-                    state.status = (
-                        f"binary edge: {signal.full_name} @ {tick} "
-                        f"({vcd.timescale.format_tick(tick)})"
-                    )
+                state.status = message
                 continue
 
             boundary = _range_boundary_for_key(curses, key, start, end)
@@ -2803,11 +3293,11 @@ def run_tui(
                 ord("n"), ord("N"), ord("e"), ord("E"),
                 ord("r"), ord("R"), ord("f"), ord("F"),
             ):
-                signal_index = _navigation_signal_index(all_signals, state)
-                if signal_index is None:
+                target = _navigation_target(all_signals, state)
+                if target is None:
                     state.status = "select/focus a signal before temporal navigation"
                     continue
-                signal = all_signals[signal_index]
+                signal, _ = target
                 forward = chr(key).islower()
                 if key in (ord("n"), ord("N")):
                     tick = next_transition(signal.stream, state.cursor, forward=forward)

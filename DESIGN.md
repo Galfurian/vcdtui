@@ -401,7 +401,12 @@ summarises everything recorded inside its own:
 the renderers and the cursor read it, so they cannot disagree about which column
 a transition belongs to. Zoomed in past one tick per column, a tick is drawn
 across a run of columns and the first of them owns it, which is what puts the
-value's start and the cursor on the same character.
+value's start and the cursor on the same character. In that regime the partition
+is by tick, not linear: every tick, the viewport's last one included, owns a
+block of columns. A linear cut starved exactly the final tick - a change landing
+on it was drawn by the previous run's owner and then contradicted by the columns
+after it, and the cursor had no column to move onto, so the exact readout moved
+while the cursor mark stood still.
 
 Sampling one tick per column instead aliases, and aliasing in a waveform viewer
 is not a coarse picture but a false one. A clock toggling every 5 ticks, viewed

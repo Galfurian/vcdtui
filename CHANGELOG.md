@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.6.0
+
+The one-row track is a dense summary, and a vector is a summary of its bits.
+This release lets both open up inside the TUI, and makes Ctrl+Left/Right step
+across every kind of signal. The parser, `--dump` and `--dump-wave` are
+unchanged; a track at height 1 renders byte-identically to 0.5.0.
+
+### Taller tracks
+
+- Add `T` / `t` to grow and shrink waveform tracks from 1 to 4 rows. A scalar
+  becomes a square wave whose high level runs along the top row and low level
+  along the bottom one (`┌ ┐ └ ┘ │`, the classic `_/ \_` shape under `--ascii`
+  at two rows); a bus becomes a box with the value centred inside it, and at
+  two rows keeps its one-line track with the labels on their own row above.
+- x, z and dense columns fill the whole height of a taller track, and a blank
+  separator row is drawn between multi-row tracks so neighbouring tracks
+  cannot merge into what would read as one waveform.
+- The multi-row renderers classify columns with the same functions as the
+  one-row one, so a taller track shows the same transitions in the same
+  columns rather than a second opinion about where they land.
+
+### Vector bits
+
+- `Enter` on a vector in the signal tree expands it into its individual bits,
+  as it already did for a scope; `Space` on a listed bit shows or hides that
+  bit as its own scalar track, drawn under its vector. A bit survives its
+  parent being hidden.
+- A bit is a derived signal whose stream records a change only where that bit
+  actually moved, so edges and transitions on it mean what they say. Bit names
+  use the declared range: `count[7:0]` expands to `count[7]` down to
+  `count[0]`, most significant first.
+
+### Navigation
+
+- `Ctrl+←/→` now steps across the previous/next value change of a vector, not
+  just binary edges of scalars. Real and string tracks report that they have
+  nothing to step across.
+- When no edge or change remains ahead, `Ctrl+←/→` moves the cursor to the
+  matching end of the active range: standing on the first rising edge,
+  `Ctrl+←` reaches the range start, and standing on the last edge, `Ctrl+→`
+  reaches the range end.
+
+### Waveform rendering
+
+- Zoomed in past one tick per column, the viewport's last tick now owns a block
+  of columns like every other tick. A linear column cut starved exactly that
+  tick, so a change landing on it was drawn by the previous run and then
+  contradicted by the columns after it (an edge with the old level running
+  through it, `┌ │ │ ┘` floating on a low line at taller track heights), and
+  the cursor had no column to move onto: pressing right at the last-but-one
+  tick left the cursor mark standing still while the exact value readout moved.
+  The partition is now by tick in that regime.
+- In the same regime the ruler no longer forces a closing mark onto the final
+  column: past the final tick's own position it read as one more tick, with
+  the end label naming it, so a cursor correctly on the last timestamp looked
+  one short of a "40ns" that sat at the view's right edge. The end label is
+  now centred on the final tick's own column, where its cursor is drawn.
+  Zoomed out, the closing mark and the right-edge label are unchanged.
+
+### Qualification
+
+- 362 tests, up from 302: multi-row rendering, bit derivation and tree/wave
+  wiring, Ctrl-arrow targets, and final-tick ownership are all exercised
+  through the pure helpers and the recording screen, without simulating
+  keystrokes.
+
 ## 0.5.0
 
 This release makes the waveform easier to focus on in the TUI and reusable as

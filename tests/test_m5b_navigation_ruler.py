@@ -104,5 +104,50 @@ class NavigationRulerTests(unittest.TestCase):
         self.assertIsNone(vcdtui._range_boundary_for_key(fake, ord("x"), 7, 42))
 
 
+class ZoomedInRulerTests(unittest.TestCase):
+    """Zoomed in, the ruler marks tick positions, and none exists past the last.
+
+    A closing mark forced onto the final column sat past the final tick's own
+    position and read as one more tick - a "40ns" at the view's right edge
+    while the cursor's 40ns mark stood seventeen columns to its left, naming
+    a tick that would logically have to be 41ns and does not exist.
+    """
+
+    VIEW = (36, 40, 84)
+
+    def setUp(self):
+        self.timescale = vcdtui.TimeScale(1, "ns")
+
+    def ruler(self):
+        return vcdtui.render_timeline_ruler(
+            self.timescale, *self.VIEW, ascii_only=False
+        )
+
+    def test_no_closing_mark_is_invented_past_the_final_tick(self):
+        _, rule = self.ruler()
+        end_col = vcdtui._cursor_column(40, *self.VIEW)
+        self.assertNotIn("┼", rule[end_col + 1 :])
+
+    def test_every_tick_including_the_last_is_marked_at_its_own_column(self):
+        _, rule = self.ruler()
+        for tick in range(36, 41):
+            col = vcdtui._cursor_column(tick, *self.VIEW)
+            with self.subTest(tick=tick):
+                self.assertEqual(rule[col], "┼")
+
+    def test_the_final_label_names_the_final_tick_not_the_view_edge(self):
+        labels, _ = self.ruler()
+        end_col = vcdtui._cursor_column(40, *self.VIEW)
+        left = labels.index("40ns")
+        self.assertEqual(left + len("40ns") // 2, end_col)
+
+    def test_zoomed_out_keeps_the_closing_mark_and_edge_label(self):
+        labels, rule = vcdtui.render_timeline_ruler(
+            vcdtui.TimeScale(10, "ps"), 0, 100, 61, ascii_only=True
+        )
+        self.assertEqual(rule[-1], "|")
+        self.assertTrue(labels.rstrip().endswith("1ns"))
+
+
 if __name__ == "__main__":
     unittest.main()

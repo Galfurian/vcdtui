@@ -128,5 +128,75 @@ $enddefinitions $end
         self.assertEqual(set(track[:rise]), {"_"})
 
 
+class FinalTickTests(unittest.TestCase):
+    """The viewport's last tick owns a block of columns like every other tick.
+
+    A linear cut gave the final tick no column at all: the previous run's owner
+    drew its change and the columns after it contradicted it (a rising edge
+    followed by the old low level, `/___` at one row and `┌ │ │ ┘` floating in
+    a taller one), and the cursor could not move onto the tick, so pressing
+    right at the last-but-one tick left the cursor mark standing still while
+    the exact readout moved.
+    """
+
+    TEXT = """\
+$timescale 1 ns $end
+$scope module tb $end
+$var reg 1 ! s $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+#4
+1!
+#5
+0!
+"""
+
+    def setUp(self):
+        self.signal = vcdtui.parse_vcd_text(self.TEXT).signals[0]
+
+    def test_the_final_tick_has_a_column_of_its_own_when_zoomed_in(self):
+        for start, end, width in [(0, 5, 20), (0, 5, 30), (0, 10, 33), (10, 30, 21), (0, 20, 60)]:
+            if end - start >= width:
+                continue
+            with self.subTest(view=(start, end, width)):
+                self.assertNotEqual(
+                    vcdtui._cursor_column(end, start, end, width),
+                    vcdtui._cursor_column(end - 1, start, end, width),
+                )
+
+    def test_no_edge_is_contradicted_by_the_level_after_it(self):
+        # Rise at 4 and fall at 5, the viewport's final tick: the pulse must be
+        # drawn whole, not as an edge with the old level leaking back in.
+        states = vcdtui._scalar_column_states(self.signal, 0, 5, 20)
+        for index, state in enumerate(states):
+            previous = states[index - 1] if index else None
+            following = states[index + 1] if index + 1 < len(states) else None
+            with self.subTest(column=index, state=state):
+                if state == "rising":
+                    self.assertNotIn(previous, ("high",))
+                    self.assertNotIn(following, ("low",))
+                if state == "falling":
+                    self.assertNotIn(previous, ("low",))
+                    self.assertNotIn(following, ("high",))
+
+    def test_a_pulse_on_the_final_tick_draws_whole_at_height_four(self):
+        rows = vcdtui.render_scalar_track_rows(
+            self.signal, 0, 5, 20, ascii_only=False, height=4
+        )
+        rise = vcdtui._cursor_column(4, 0, 5, 20)
+        fall = vcdtui._cursor_column(5, 0, 5, 20)
+        self.assertEqual(rows[0][rise : fall + 1], "┌──┐")
+        self.assertEqual(rows[3][rise : fall + 1], "┘  └")
+        self.assertEqual(set(rows[3][fall + 1 :]), {"─"})
+        self.assertEqual(set(rows[0][:rise]), {" "})
+
+    def test_a_change_on_the_final_tick_is_drawn_at_its_own_column(self):
+        states = vcdtui._scalar_column_states(self.signal, 0, 5, 20)
+        self.assertEqual(states[vcdtui._cursor_column(4, 0, 5, 20)], "rising")
+        self.assertEqual(states[vcdtui._cursor_column(5, 0, 5, 20)], "falling")
+
+
 if __name__ == "__main__":
     unittest.main()
