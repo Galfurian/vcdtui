@@ -30,7 +30,7 @@ Physical times are never rounded: a value that does not land exactly on the VCD 
 signal tree | shown @cursor | waveform
 ```
 
-The signal tree follows nested VCD scopes, the middle pane shows the exact value at the cursor, and the waveform pane provides an exact time ruler, pan/zoom, transition navigation, markers, and scalar/bus rendering.
+The signal tree follows nested VCD scopes, the middle pane shows the exact value at the cursor, and the waveform pane provides an exact time ruler, pan/zoom, event navigation, markers, and scalar/bus rendering.
 
 Each column of the waveform is an interval of ticks, and it summarises what
 happens inside it rather than sampling one tick:
@@ -62,10 +62,9 @@ g                   goto exact tick or physical time
 < / >               pan
 + / -               zoom
 
-n/N                 next / previous transition
-e/E                 next / previous clean binary edge
-r/R                 next / previous rising edge
-f/F                 next / previous falling edge
+F                   edit the signal filter (regular expression)
+/                   start a new signal search
+n / p               next / previous search match
 
 m / M               place marker A / B
 c                   clear markers
@@ -73,7 +72,7 @@ i                   before/after inspector
 q                   quit
 ```
 
-`Ctrl+Left` / `Ctrl+Right` are aliases for clean binary-edge navigation when the terminal exposes those modified keys; `e/E` is the portable form.
+`Ctrl+Left` / `Ctrl+Right` move to the previous or next value change of the focused signal. Search is non-destructive: `/` opens a regular-expression search, then `n` and `p` move through its matches without changing which signals are selected or plotted. Press `Esc` to leave find mode. The filter is edited in place on the ruler row and does not change selection state.
 
 Vector display format is per signal. The underlying VCD value remains unchanged, and values containing `x` or `z` remain explicit bit patterns instead of being coerced to a number.
 

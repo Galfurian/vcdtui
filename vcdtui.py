@@ -26,7 +26,7 @@ from typing import (
     Union,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 MINIMUM_PYTHON = (3, 10)
 DEFAULT_WAVE_WIDTH = 80
@@ -264,6 +264,10 @@ class TUIState:
     marker_b: Optional[int] = None
     display_formats: List[str] = field(default_factory=list)
     status: str = ""
+    filter_pattern: str = ""
+    filter_editing: bool = False
+    search_pattern: str = ""
+    search_mode: bool = False
 
 
 class TokenStream:
@@ -1352,6 +1356,51 @@ def build_tree_items(
     return items
 
 
+def compile_signal_pattern(pattern: str) -> Tuple[Optional[re.Pattern[str]], Optional[str]]:
+    """Compile a UI signal pattern, returning a concise user-facing error."""
+    if not pattern:
+        return None, None
+    try:
+        return re.compile(pattern, re.IGNORECASE), None
+    except re.error as exc:
+        return None, str(exc)
+
+
+def signal_matches(signal: Signal, pattern: re.Pattern[str]) -> bool:
+    return bool(pattern.search(signal.display_name))
+
+
+def filtered_tree_items(
+    signals: Sequence[Signal],
+    expanded_scopes: Set[Tuple[str, ...]],
+    expanded_signals: Set[int],
+    pattern: str,
+) -> List[TreeItem]:
+    items = build_tree_items(signals, expanded_scopes, expanded_signals)
+    compiled, error = compile_signal_pattern(pattern)
+    if compiled is None:
+        return items if error is not None else items
+    matching = set()
+    for i, signal in enumerate(signals):
+        if signal_matches(signal, compiled):
+            matching.add(i)
+            continue
+        if is_expandable_vector(signal) and any(
+            compiled.search(f"{signal.reference}[{number}]")
+            for number in bit_numbers(signal)
+        ):
+            matching.add(i)
+    if not matching:
+        return []
+    return [
+        item for item in items
+        if item.signal_index in matching
+        or (item.kind == "scope" and any(
+            _signal_scope(signals[i])[: len(item.path)] == item.path for i in matching
+        ))
+    ]
+
+
 def _event_times(signals: Sequence[Signal], start: int, end: int) -> List[int]:
     times = {start, end}
     seen_streams = set()
@@ -2000,6 +2049,47 @@ def _prompt_goto(stdscr, vcd: VCDFile, start: int, end: int, status_row: int) ->
     return tick, ""
 
 
+def _prompt_search(stdscr, current: str, status_row: int) -> Tuple[Optional[str], str]:
+    """Read a signal-search regexp without letting it become a global command."""
+    import curses
+
+    height, width = stdscr.getmaxyx()
+    if status_row >= height:
+        return None, "terminal too small for search prompt"
+    prompt = "search signal regexp: "
+    stdscr.move(status_row, 0)
+    stdscr.clrtoeol()
+    _safe_addstr(stdscr, status_row, 0, prompt + current)
+    stdscr.refresh()
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    curses.echo()
+    try:
+        raw = stdscr.getstr(
+            status_row,
+            min(len(prompt), max(0, width - 2)),
+            max(1, width - len(prompt) - 2),
+        )
+    finally:
+        curses.noecho()
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return None, "search input is not valid UTF-8"
+    if not text:
+        return None, "search cancelled"
+    _, error = compile_signal_pattern(text)
+    if error is not None:
+        return None, f"invalid search regexp: {error}"
+    return text, ""
+
+
 def _init_curses_colors(curses, enabled: bool) -> Dict[str, int]:
     attrs = {
         "scalar": 0,
@@ -2064,7 +2154,7 @@ def _bit_signal(
 
 
 def visible_wave_rows(
-    all_signals: Sequence[Signal], state: TUIState
+    all_signals: Sequence[Signal], state: TUIState, pattern: str = ""
 ) -> List[WaveRow]:
     """The tracks on screen, in draw order.
 
@@ -2073,6 +2163,19 @@ def visible_wave_rows(
     vector to read its bits alone is a legitimate way to look at it, so those
     bits move to the end in declaration order instead of disappearing.
     """
+    compiled, error = compile_signal_pattern(pattern)
+    if error is not None:
+        compiled = None
+
+    def matches(row: WaveRow) -> bool:
+        if compiled is None:
+            return True
+        name = row.signal.display_name
+        if row.bit_position is not None:
+            parent = all_signals[row.signal_index]
+            name = f"{parent.reference}[{bit_numbers(parent)[row.bit_position]}]"
+        return bool(compiled.search(name))
+
     rows: List[WaveRow] = []
     trailing: List[WaveRow] = []
     for index, signal in enumerate(all_signals):
@@ -2082,10 +2185,12 @@ def visible_wave_rows(
             for position in sorted(bits)
         ]
         if state.selected[index]:
-            rows.append(WaveRow(signal, index))
-            rows.extend(bit_rows)
+            signal_row = WaveRow(signal, index)
+            if matches(signal_row):
+                rows.append(signal_row)
+            rows.extend(row for row in bit_rows if matches(row))
         else:
-            trailing.extend(bit_rows)
+            trailing.extend(row for row in bit_rows if matches(row))
     return rows + trailing
 
 
@@ -2405,12 +2510,14 @@ def _help_lines(*, ascii_only: bool) -> List[str]:
         "  v                   value format menu (Up/Down, Enter, Esc)",
         "Time & view",
         f"  {arrows:<20} cursor one VCD tick",
-        f"  {ctrl_arrows:<20} previous / next edge; vectors step to value changes",
+        f"  {ctrl_arrows:<20} previous / next value change",
         "  Home / End          active-range start / end",
         "  g                   goto exact tick or physical time",
         "  < / >   + / -       pan / zoom viewport",
         "  T / t               taller / shorter waveform tracks",
-        "  n/N  e/E  r/R  f/F transition / edge / rising / falling",
+        "  F                   edit signal filter (regexp)",
+        "  /                   start a new signal search",
+        "  n / p               next / previous search match",
         "Reading the waveform",
         "  ▓ (# in --ascii)     column holds several changes; zoom in to resolve",
         "  │                   a bus changes value in this column",
@@ -2445,9 +2552,9 @@ def shortcut_bar(width: int, *, ascii_only: bool) -> str:
         return ""
     sep = " | " if ascii_only else " · "
     arrows = "<- -> cursor" if ascii_only else "←→ cursor"
-    ctrl_edges = "Ctrl<- -> edge" if ascii_only else "Ctrl+←→ edge"
+    ctrl_edges = "Ctrl<- -> change" if ascii_only else "Ctrl+←→ change"
     candidates = [
-        ["Tab pane", "Space show/hide", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "T tracks", "m/M markers", "F1/? help", "q quit"],
+        ["Tab pane", "F filter", "/ search", "n/p matches", "Space show/hide", "a all", "v format", arrows, ctrl_edges, "+/- zoom", "T tracks", "m/M markers", "F1/? help", "q quit"],
         ["Tab pane", "Space show/hide", "v format", arrows, "+/- zoom", "T tracks", "F1/? help", "q quit"],
         ["Tab pane", arrows, "+/- zoom", "F1/? help", "q quit"],
         [arrows, "F1/? help", "q quit"],
@@ -2666,6 +2773,67 @@ def _draw_ruler(
         _safe_addstr(stdscr, 2, x + col, "^", attrs["cursor"])
 
 
+def _draw_filter_box(stdscr, state: TUIState, width: int, attrs: Dict[str, int]) -> None:
+    if width <= 0:
+        return
+    text = f"Filter: [{state.filter_pattern}]"
+    _safe_addstr(stdscr, 2, 0, _clip_end(text, width, ascii_only=True), attrs["focus"] if state.filter_editing else attrs["dim"])
+
+
+def _prompt_filter(stdscr, current: str, width: int) -> Tuple[Optional[str], str]:
+    import curses
+
+    prompt = "Filter: ["
+    close = "]"
+    capacity = max(1, width - len(prompt) - len(close) - 1)
+    buffer = list(current)
+    cursor = len(buffer)
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    try:
+        while True:
+            visible = "".join(buffer)
+            if len(visible) > capacity:
+                visible = visible[-capacity:]
+                cursor = min(len(visible), cursor)
+            line = (prompt + visible + close)[: max(0, width - 1)]
+            stdscr.move(2, 0)
+            stdscr.clrtoeol()
+            _safe_addstr(stdscr, 2, 0, line)
+            stdscr.move(2, min(width - 2, len(prompt) + cursor))
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key in (10, 13, getattr(curses, "KEY_ENTER", -999)):
+                text = "".join(buffer)
+                _, error = compile_signal_pattern(text)
+                if error is not None:
+                    return None, f"invalid filter regexp: {error}"
+                return text, ""
+            if key == 27:
+                return None, "filter cancelled"
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                if cursor:
+                    del buffer[cursor - 1]
+                    cursor -= 1
+            elif key == getattr(curses, "KEY_DC", -998):
+                if cursor < len(buffer):
+                    del buffer[cursor]
+            elif key == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+            elif key == curses.KEY_RIGHT:
+                cursor = min(len(buffer), cursor + 1)
+            elif 32 <= key <= 126:
+                buffer.insert(cursor, chr(key))
+                cursor += 1
+    finally:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+
+
 def _tree_item_text(item: TreeItem, state: TUIState, *, ascii_only: bool) -> str:
     indent = "  " * item.depth
     if item.kind == "scope":
@@ -2745,8 +2913,8 @@ def _draw_tui(
         stdscr.refresh()
         return
 
-    tree_items = build_tree_items(
-        all_signals, state.expanded_scopes, state.expanded_signals
+    tree_items = filtered_tree_items(
+        all_signals, state.expanded_scopes, state.expanded_signals, state.filter_pattern
     )
     meta_width = min(28, max(18, width // 5))
     divider1_x: Optional[int]
@@ -2805,7 +2973,7 @@ def _draw_tui(
             len(tree_items),
         )
 
-    rows = visible_wave_rows(all_signals, state)
+    rows = visible_wave_rows(all_signals, state, state.filter_pattern)
     state.wave_focus, state.wave_offset = _ensure_offset(
         state.wave_focus,
         state.wave_offset,
@@ -2822,6 +2990,8 @@ def _draw_tui(
         attrs,
         ascii_only=ascii_only,
     )
+    if state.show_signal_tree:
+        _draw_filter_box(stdscr, state, divider1_x or 0, attrs)
     if state.show_signal_tree:
         _safe_addstr(stdscr, header_row, 0, "signals", curses.A_BOLD)
     _safe_addstr(stdscr, header_row, meta_x, "shown @cursor", curses.A_BOLD)
@@ -2951,8 +3121,12 @@ def _draw_tui(
     marker_text = (" | " + " ".join(marker_status)) if marker_status else ""
     bits_text = f" | bits {bits_count}" if bits_count else ""
     status = state.status or (
-        f"pane={pane} | selected {selected_count}/{len(all_signals)}{bits_text} | "
-        f"range {range_start}..{range_end}{marker_text}"
+        f"FIND /{state.search_pattern}/ — n next, p previous, Esc exit"
+        if state.search_mode
+        else (
+            f"pane={pane} | selected {selected_count}/{len(all_signals)}{bits_text} | "
+            f"range {range_start}..{range_end}{marker_text}"
+        )
     )
     if height >= 2:
         shortcuts = shortcut_bar(width - 1, ascii_only=ascii_only)
@@ -2991,7 +3165,9 @@ def _move_to_time(
 
 
 def _tree_focused_item(signals: Sequence[Signal], state: TUIState) -> Optional[TreeItem]:
-    items = build_tree_items(signals, state.expanded_scopes, state.expanded_signals)
+    items = filtered_tree_items(
+        signals, state.expanded_scopes, state.expanded_signals, state.filter_pattern
+    )
     if not items:
         return None
     state.tree_focus = min(max(0, state.tree_focus), len(items) - 1)
@@ -3001,11 +3177,45 @@ def _tree_focused_item(signals: Sequence[Signal], state: TUIState) -> Optional[T
 def _wave_focused_row(
     all_signals: Sequence[Signal], state: TUIState
 ) -> Optional[WaveRow]:
-    rows = visible_wave_rows(all_signals, state)
+    rows = visible_wave_rows(all_signals, state, state.filter_pattern)
     if not rows:
         return None
     state.wave_focus = min(max(0, state.wave_focus), len(rows) - 1)
     return rows[state.wave_focus]
+
+
+def _search_signal(
+    all_signals: Sequence[Signal], state: TUIState, *, forward: bool
+) -> Optional[Signal]:
+    compiled, error = compile_signal_pattern(state.search_pattern)
+    if compiled is None or error is not None:
+        return None
+    matches = [i for i, signal in enumerate(all_signals) if signal_matches(signal, compiled)]
+    if not matches:
+        return None
+    current = -1
+    focused = _tree_focused_item(all_signals, state)
+    if focused is not None and focused.signal_index in matches:
+        current = matches.index(focused.signal_index)
+    elif state.wave_focus < len(visible_wave_rows(all_signals, state, "")):
+        current_signal = visible_wave_rows(all_signals, state, "")[state.wave_focus].signal
+        current = next((n for n, i in enumerate(matches) if all_signals[i] is current_signal), -1)
+    offset = 1 if forward else -1
+    target_index = matches[(current + offset) % len(matches)]
+    state.expanded_scopes.update(all_scope_paths([all_signals[target_index]]))
+    items = filtered_tree_items(
+        all_signals, state.expanded_scopes, state.expanded_signals, state.filter_pattern
+    )
+    for index, item in enumerate(items):
+        if item.signal_index == target_index and item.kind == "signal":
+            state.tree_focus = index
+            break
+    rows = visible_wave_rows(all_signals, state, state.filter_pattern)
+    for index, row in enumerate(rows):
+        if row.signal_index == target_index and row.bit_position is None:
+            state.wave_focus = index
+            break
+    return all_signals[target_index]
 
 
 def _navigation_target(
@@ -3088,6 +3298,50 @@ def run_tui(
             if _is_help_key(curses, key):
                 _show_help(stdscr, ascii_only=ascii_only)
                 continue
+            if key == ord("F"):
+                state.filter_editing = True
+                pattern, message = _prompt_filter(
+                    stdscr,
+                    state.filter_pattern,
+                    min(48, max(20, stdscr.getmaxyx()[1] // 3))
+                    if state.show_signal_tree else 0,
+                ) if state.show_signal_tree else (None, "show the signal pane before editing its filter")
+                state.filter_editing = False
+                if pattern is not None:
+                    state.filter_pattern = pattern
+                    state.tree_focus = state.tree_offset = 0
+                    state.wave_focus = state.wave_offset = 0
+                    state.status = f"signal filter: /{pattern}/" if pattern else "signal filter cleared"
+                elif message:
+                    state.status = message
+                continue
+            if key == ord("/"):
+                pattern, message = _prompt_search(stdscr, "", stdscr.getmaxyx()[0] - 1)
+                if pattern is None:
+                    state.status = message
+                    continue
+                state.search_pattern = pattern
+                state.search_mode = True
+                match = _search_signal(all_signals, state, forward=True)
+                state.status = (
+                    f"FIND /{pattern}/: {match.full_name} — n next, p previous, Esc exit"
+                    if match is not None
+                    else f"FIND /{pattern}/: no matches — n/p retry, Esc exit"
+                )
+                continue
+            if state.search_mode:
+                if key == 27:
+                    state.search_mode = False
+                    state.status = "find mode exited"
+                    continue
+                if key in (ord("n"), ord("p")):
+                    match = _search_signal(all_signals, state, forward=key == ord("n"))
+                    state.status = (
+                        f"FIND /{state.search_pattern}/: {match.full_name} — n next, p previous, Esc exit"
+                        if match is not None
+                        else f"FIND /{state.search_pattern}/: no matches — n/p retry, Esc exit"
+                    )
+                    continue
             if key in (ord("s"), ord("S")):
                 _toggle_signal_tree(state)
                 continue
@@ -3289,36 +3543,6 @@ def run_tui(
                     end,
                     forward=True,
                 )
-            elif key in (
-                ord("n"), ord("N"), ord("e"), ord("E"),
-                ord("r"), ord("R"), ord("f"), ord("F"),
-            ):
-                target = _navigation_target(all_signals, state)
-                if target is None:
-                    state.status = "select/focus a signal before temporal navigation"
-                    continue
-                signal, _ = target
-                forward = chr(key).islower()
-                if key in (ord("n"), ord("N")):
-                    tick = next_transition(signal.stream, state.cursor, forward=forward)
-                    label = "transition"
-                elif key in (ord("e"), ord("E")):
-                    tick = next_edge(signal.stream, state.cursor, "any", forward=forward)
-                    label = "binary edge"
-                elif key in (ord("r"), ord("R")):
-                    tick = next_edge(signal.stream, state.cursor, "rising", forward=forward)
-                    label = "rising edge"
-                else:
-                    tick = next_edge(signal.stream, state.cursor, "falling", forward=forward)
-                    label = "falling edge"
-                if tick is None:
-                    state.status = f"no {'next' if forward else 'previous'} {label} for {signal.full_name}"
-                else:
-                    _move_to_time(state, tick, start, end)
-                    state.status = (
-                        f"{label}: {signal.full_name} @ {tick} "
-                        f"({vcd.timescale.format_tick(tick)})"
-                    )
             elif key == curses.KEY_RESIZE:
                 continue
 

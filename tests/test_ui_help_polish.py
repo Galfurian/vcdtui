@@ -21,7 +21,9 @@ class UIHelpPolishTests(unittest.TestCase):
             "Inspect",
             "Ctrl+←/→",
             "Home / End",
-            "n/N  e/E  r/R  f/F",
+            "F                   edit signal filter",
+            "/                   start a new signal search",
+            "n / p",
             "m / M",
             "F1 / ?",
         ):

@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.6.0
+## 0.7.0
 
 The one-row track is a dense summary, and a vector is a summary of its bits.
 This release lets both open up inside the TUI, and makes Ctrl+Left/Right step
 across every kind of signal. The parser, `--dump` and `--dump-wave` are
 unchanged; a track at height 1 renders byte-identically to 0.5.0.
+
+### Signal filtering and search
+
+- Add an in-place regular-expression filter to the signal column. `F` enters
+  its editor on the ruler row; `Enter` applies it, `Esc` cancels, and pressing
+  `F` again reopens the existing text for manual editing. Filtering is
+  temporary and does not alter signal selection.
+- Add `/` search, which focuses and scrolls to matching signals without hiding
+  anything. After confirming a pattern, `n` and `p` move to the next and
+  previous matches; `Esc` leaves find mode.
 
 ### Taller tracks
 
@@ -61,7 +71,7 @@ unchanged; a track at height 1 renders byte-identically to 0.5.0.
 
 ### Qualification
 
-- 362 tests, up from 302: multi-row rendering, bit derivation and tree/wave
+- 366 tests, up from 362: multi-row rendering, bit derivation and tree/wave
   wiring, Ctrl-arrow targets, and final-tick ownership are all exercised
   through the pure helpers and the recording screen, without simulating
   keystrokes.
